@@ -20,19 +20,28 @@ interface UsePeerConnectionArgs {
 
 const ICE_SERVERS = [
   { urls: "stun:stun.l.google.com:19302" },
-  { urls: "stun:stun1.l.google.com:19302" },
-  { urls: "stun:stun2.l.google.com:19302" },
-  { urls: "stun:stun3.l.google.com:19302" },
-  { urls: "stun:stun4.l.google.com:19302" },
-  { urls: "stun:stun.openrelay.mutedford.com:3478" },
-  { urls: "stun:stun.sipgate.net" },
+  {
+    urls: "turn:camshow.metered.live:80",
+    username: "2bf9d2e7d7c917acd37da4cb",
+    credential: "MqqqGjAPwjVbtP1B",
+  },
+  {
+    urls: "turn:camshow.metered.live:443",
+    username: "2bf9d2e7d7c917acd37da4cb",
+    credential: "MqqqGjAPwjVbtP1B",
+  },
+  {
+    urls: "turn:camshow.metered.live:443?transport=tcp",
+    username: "2bf9d2e7d7c917acd37da4cb",
+    credential: "MqqqGjAPwjVbtP1B",
+  },
 ];
 
 const HANDSHAKE_TIMEOUT_MS = 8000;
 const MAX_RETRIES = 3;
 
 /**
- * Manages a PeerJS peer-to-peer connection with explicit Google STUN servers
+ * Manages a PeerJS peer-to-peer connection with Metered TURN servers
  * and auto-retry logic for cross-network signaling.
  */
 export function usePeerConnection({
