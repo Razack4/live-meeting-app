@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AlertCircle, Phone, PhoneOff, Video } from "lucide-react";
 import VideoCall from "@/components/VideoCall";
-import { usePeerConnection } from "@/hooks/usePeerConnection";
-import type { PeerStatus } from "@/hooks/usePeerConnection";
+import { useAgoraClient } from "@/hooks/useAgoraClient";
+import type { ConnectionState } from "@/types";
 
 type GuestPhase = "incoming" | "connecting" | "active" | "ended";
 
@@ -40,8 +40,14 @@ export default function GuestScreen({ roomId }: { roomId: string }) {
     setPhase("ended");
   }, [roomId]);
 
-  const { status: peerStatus, cleanup: peerCleanup } = usePeerConnection({
-    roomId: session ? roomId : "",
+  const {
+    state: connectionState,
+    error: agoraError,
+    cleanup: agoraCleanup,
+    toggleCamera,
+    toggleMic,
+  } = useAgoraClient({
+    channel: session ? roomId : "",
     isHost: false,
     localStream: session?.localStream ?? null,
     onRemoteStream: handleRemoteStream,
@@ -91,7 +97,7 @@ export default function GuestScreen({ roomId }: { roomId: string }) {
   };
 
   const handleEnd = useCallback(() => {
-    peerCleanup();
+    agoraCleanup();
     if (streamRef.current) {
       streamRef.current.getTracks().forEach((t) => t.stop());
       streamRef.current = null;
@@ -104,7 +110,7 @@ export default function GuestScreen({ roomId }: { roomId: string }) {
       // localStorage may be unavailable in private browsing
     }
     setPhase("ended");
-  }, [peerCleanup, roomId]);
+  }, [agoraCleanup, roomId]);
 
   // ---- Ended screen (non-interactive) ----
   if (phase === "ended") {
@@ -132,8 +138,10 @@ export default function GuestScreen({ roomId }: { roomId: string }) {
         displayName={session.displayName}
         remoteLabel="Host"
         isHost={false}
-        peerStatus={peerStatus}
+        connectionState={connectionState as ConnectionState}
         onEnd={handleEnd}
+        onToggleCamera={toggleCamera}
+        onToggleMic={toggleMic}
       />
     );
   }
@@ -155,10 +163,10 @@ export default function GuestScreen({ roomId }: { roomId: string }) {
           </p>
         </div>
 
-        {error && (
+        {(error || agoraError) && (
           <p className="flex items-start gap-2 text-sm text-red-400 bg-red-500/10 ring-1 ring-red-500/20 rounded-xl px-4 py-3 max-w-sm">
             <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" />
-            {error}
+            {error || agoraError}
           </p>
         )}
 

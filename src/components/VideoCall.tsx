@@ -8,7 +8,7 @@ import {
   VideoOff,
 } from "lucide-react";
 import { useCallTimer } from "@/hooks/useCallTimer";
-import type { PeerStatus } from "@/hooks/usePeerConnection";
+import type { ConnectionState } from "@/types";
 
 interface VideoCallProps {
   localStream: MediaStream;
@@ -16,8 +16,10 @@ interface VideoCallProps {
   displayName: string;
   remoteLabel: string;
   isHost: boolean;
-  peerStatus: PeerStatus;
+  connectionState: ConnectionState;
   onEnd: () => void;
+  onToggleCamera: (on: boolean) => void;
+  onToggleMic: (on: boolean) => void;
 }
 
 export default function VideoCall({
@@ -26,15 +28,17 @@ export default function VideoCall({
   displayName,
   remoteLabel,
   isHost,
-  peerStatus,
+  connectionState,
   onEnd,
+  onToggleCamera,
+  onToggleMic,
 }: VideoCallProps) {
   const mainVideoRef = useRef<HTMLVideoElement>(null);
   const pipVideoRef = useRef<HTMLVideoElement>(null);
   const [muted, setMuted] = useState(false);
   const [videoOn, setVideoOn] = useState(true);
   const [swapped, setSwapped] = useState(false);
-  const elapsed = useCallTimer(true);
+  const elapsed = useCallTimer(connectionState === "connected");
 
   useEffect(() => {
     const v = mainVideoRef.current;
@@ -66,16 +70,12 @@ export default function VideoCall({
   }, [localStream, remoteStream, swapped]);
 
   useEffect(() => {
-    localStream.getAudioTracks().forEach((t) => {
-      t.enabled = !muted;
-    });
-  }, [muted, localStream]);
+    onToggleMic(!muted);
+  }, [muted, onToggleMic]);
 
   useEffect(() => {
-    localStream.getVideoTracks().forEach((t) => {
-      t.enabled = videoOn;
-    });
-  }, [videoOn, localStream]);
+    onToggleCamera(videoOn);
+  }, [videoOn, onToggleCamera]);
 
   const handleEnd = () => {
     [mainVideoRef.current, pipVideoRef.current].forEach((v) => {
@@ -89,12 +89,12 @@ export default function VideoCall({
     onEnd();
   };
 
-  const statusLabel: Record<PeerStatus, string> = {
+  const statusLabel: Record<ConnectionState, string> = {
     idle: "Idle",
     initializing: "Initializing…",
-    waiting: "Waiting for guest…",
     connecting: "Connecting…",
     connected: "Connected",
+    reconnecting: "Reconnecting…",
     disconnected: "Disconnected",
     error: "Connection error",
   };
@@ -123,23 +123,27 @@ export default function VideoCall({
               <span
                 className={`px-2.5 py-1 rounded-full backdrop-blur-md text-xs font-medium ring-1 ring-white/10
                   ${
-                    peerStatus === "connected"
+                    connectionState === "connected"
                       ? "bg-emerald-500/20 text-emerald-400"
-                      : peerStatus === "error"
+                      : connectionState === "error"
                         ? "bg-red-500/20 text-red-400"
-                        : "bg-black/40 text-white/70"
+                        : connectionState === "reconnecting"
+                          ? "bg-amber-500/20 text-amber-400"
+                          : "bg-black/40 text-white/70"
                   }`}
               >
-                {statusLabel[peerStatus]}
+                {statusLabel[connectionState]}
               </span>
-              <span className="px-2.5 py-1 rounded-full bg-black/40 backdrop-blur-md text-sm font-medium text-white ring-1 ring-white/10 tabular-nums">
-                {elapsed}
-              </span>
+              {connectionState === "connected" && (
+                <span className="px-2.5 py-1 rounded-full bg-black/40 backdrop-blur-md text-sm font-medium text-white ring-1 ring-white/10 tabular-nums">
+                  {elapsed}
+                </span>
+              )}
             </div>
           </div>
         </div>
 
-        {!remoteStream && peerStatus !== "connected" && (
+        {!remoteStream && connectionState !== "connected" && (
           <div className="absolute inset-0 flex flex-col items-center justify-center gap-4 pointer-events-none">
             <div className="w-20 h-20 rounded-full bg-white/10 ring-2 ring-white/10 flex items-center justify-center text-2xl font-semibold text-white/60">
               {remoteLabel.charAt(0).toUpperCase()}

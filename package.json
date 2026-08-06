@@ -1,17 +1,17 @@
 {
-  "name": "vite-react-typescript-starter",
+  "name": "live-meeting-app",
   "private": true,
-  "version": "0.0.0",
+  "version": "1.0.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "server": "node server/index.js"
   },
   "dependencies": {
-    "@supabase/supabase-js": "^2.111.0",
+    "agora-rtc-sdk-ng": "^4.23.0",
     "lucide-react": "^1.28.0",
-    "peerjs": "^1.5.5",
     "react": "^19.2.8",
     "react-dom": "^19.2.8"
   },

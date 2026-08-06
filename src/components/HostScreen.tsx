@@ -9,7 +9,7 @@ import {
   X,
 } from "lucide-react";
 import VideoCall from "@/components/VideoCall";
-import { usePeerConnection } from "@/hooks/usePeerConnection";
+import { useAgoraClient } from "@/hooks/useAgoraClient";
 import {
   buildShareableLink,
   generateRoomId,
@@ -77,7 +77,7 @@ export default function HostScreen() {
     e.target.value = "";
   };
 
-  const handleDrop = (e: React.DragEvent<HTMLDivElement>) => {
+  const handleDrop = (e: React.ChangeEvent<HTMLDivElement>) => {
     e.preventDefault();
     setDragOver(false);
     const file = e.dataTransfer.files?.[0];
@@ -133,8 +133,14 @@ export default function HostScreen() {
     setRemoteStream(null);
   }, []);
 
-  const { status: peerStatus, cleanup: peerCleanup } = usePeerConnection({
-    roomId: session?.roomId ?? "",
+  const {
+    state: connectionState,
+    error: agoraError,
+    cleanup: agoraCleanup,
+    toggleCamera,
+    toggleMic,
+  } = useAgoraClient({
+    channel: session?.roomId ?? "",
     isHost: true,
     localStream: session?.localStream ?? null,
     onRemoteStream: handleRemoteStream,
@@ -142,7 +148,7 @@ export default function HostScreen() {
   });
 
   const handleEnd = useCallback(() => {
-    peerCleanup();
+    agoraCleanup();
     if (session) {
       session.localStream.getTracks().forEach((t) => t.stop());
     }
@@ -155,7 +161,7 @@ export default function HostScreen() {
     setPhase("setup");
     setLinkGenerated(false);
     setRoomId(generateRoomId());
-  }, [session, peerCleanup]);
+  }, [session, agoraCleanup]);
 
   if (phase === "active" && session) {
     return (
@@ -165,8 +171,10 @@ export default function HostScreen() {
         displayName={session.displayName}
         remoteLabel="Guest"
         isHost={true}
-        peerStatus={peerStatus}
+        connectionState={connectionState}
         onEnd={handleEnd}
+        onToggleCamera={toggleCamera}
+        onToggleMic={toggleMic}
       />
     );
   }
@@ -332,7 +340,7 @@ export default function HostScreen() {
 
       <footer className="px-6 pb-8 text-center">
         <p className="text-xs text-white/30">
-          Peer-to-peer · nothing is stored on a server
+          Powered by Agora · works on Wi-Fi, LTE, 4G, 5G
         </p>
       </footer>
 

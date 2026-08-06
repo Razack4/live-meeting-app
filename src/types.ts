@@ -42,3 +42,12 @@ export function getRoomIdFromUrl(): string | null {
   const room = params.get("room");
   return room || null;
 }
+
+export type ConnectionState =
+  | "idle"
+  | "initializing"
+  | "connecting"
+  | "connected"
+  | "reconnecting"
+  | "disconnected"
+  | "error";

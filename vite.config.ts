@@ -9,6 +9,6 @@ export default defineConfig({
     tsconfigPaths: true,
   },
   optimizeDeps: {
-    exclude: ['lucide-react'],
+    exclude: ['lucide-react', 'agora-rtc-sdk-ng'],
   },
 });

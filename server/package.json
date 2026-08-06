@@ -1,0 +1,11 @@
+{
+  "name": "live-meeting-app-server",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "agora-access-token": "^2.0.4"
+  }
+}

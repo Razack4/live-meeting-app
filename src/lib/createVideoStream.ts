@@ -2,12 +2,11 @@ import type { VideoSelection } from "@/types";
 
 /**
  * Creates a MediaStream from a pre-recorded video file using captureStream().
- * The returned stream contains the video track from the playing file.
- * The caller is responsible for stopping tracks and revoking the blob URL.
+ * Returns a promise that resolves when the stream is ready with at least one track.
  */
 export function createVideoStream(
   selection: VideoSelection,
-): { stream: MediaStream; cleanup: () => void } {
+): { stream: MediaStream; cleanup: () => void; ready: Promise<void> } {
   const video = document.createElement("video");
   video.src = selection.url;
   video.muted = true;
@@ -16,6 +15,11 @@ export function createVideoStream(
   video.autoplay = true;
 
   const stream = new MediaStream();
+
+  let resolveReady: () => void;
+  const ready = new Promise<void>((resolve) => {
+    resolveReady = resolve;
+  });
 
   const attachCapture = () => {
     try {
@@ -27,9 +31,12 @@ export function createVideoStream(
         extended.captureStream?.() ?? extended.mozCaptureStream?.();
       if (captured) {
         captured.getVideoTracks().forEach((t) => stream.addTrack(t));
+        if (stream.getVideoTracks().length > 0) {
+          resolveReady();
+        }
       }
     } catch {
-      // captureStream not supported — stream stays empty
+      // captureStream not supported
     }
   };
 
@@ -45,5 +52,5 @@ export function createVideoStream(
     video.load();
   };
 
-  return { stream, cleanup };
+  return { stream, cleanup, ready };
 }
