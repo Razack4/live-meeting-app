@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   AgoraRTC,
+  AGORA_APP_ID,
   type IAgoraRTCClient,
   type IAgoraRTCRemoteUser,
   type IMicrophoneAudioTrack,
   type ICameraVideoTrack,
 } from "@/lib/agora";
-import { fetchToken } from "@/lib/tokenService";
 import type { ConnectionState } from "@/types";
 
 interface UseAgoraClientArgs {
@@ -141,8 +141,6 @@ export function useAgoraClient({
     setError(null);
 
     try {
-      const tokenData = await fetchToken(channel, 0);
-
       if (!mountedRef.current) return;
 
       const client = AgoraRTC.createClient({ mode: "rtc", codec: "vp8" });
@@ -174,12 +172,7 @@ export function useAgoraClient({
         console.warn("[agora] exception", event);
       });
 
-      await client.join(
-        tokenData.appId,
-        channel,
-        tokenData.token,
-        tokenData.uid,
-      );
+      await client.join(AGORA_APP_ID, channel, null, null);
       joinedRef.current = true;
       setState("connecting");
 

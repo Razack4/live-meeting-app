@@ -16,3 +16,5 @@ export type {
 };
 
 export { AgoraRTC };
+
+export const AGORA_APP_ID = "399fcbd7f72b49588d68fd5476fcf308";
