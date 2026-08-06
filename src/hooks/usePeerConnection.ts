@@ -18,15 +18,22 @@ interface UsePeerConnectionArgs {
   onRemoteEnd?: () => void;
 }
 
+const ICE_SERVERS = [
+  { urls: "stun:stun.l.google.com:19302" },
+  { urls: "stun:stun1.l.google.com:19302" },
+  { urls: "stun:stun2.l.google.com:19302" },
+  { urls: "stun:stun3.l.google.com:19302" },
+  { urls: "stun:stun4.l.google.com:19302" },
+  { urls: "stun:stun.openrelay.mutedford.com:3478" },
+  { urls: "stun:stun.sipgate.net" },
+];
+
+const HANDSHAKE_TIMEOUT_MS = 8000;
+const MAX_RETRIES = 3;
+
 /**
- * Manages a PeerJS peer-to-peer connection.
- *
- * Host: creates a Peer with the roomId as its ID and waits for an incoming
- * media call from the guest. When the guest's media call arrives, it answers
- * with the host's local stream (the captured pre-recorded video).
- *
- * Guest: creates a Peer with a random ID and, once the host peer is open, calls
- * the host's roomId, sending the guest's live camera stream.
+ * Manages a PeerJS peer-to-peer connection with explicit Google STUN servers
+ * and auto-retry logic for cross-network signaling.
  */
 export function usePeerConnection({
   roomId,
@@ -42,13 +49,32 @@ export function usePeerConnection({
   const mediaConnRef = useRef<MediaConnection | null>(null);
   const dataConnRef = useRef<DataConnection | null>(null);
   const localStreamRef = useRef<MediaStream | null>(localStream);
+  const retryCountRef = useRef(0);
+  const handshakeTimerRef = useRef<number | null>(null);
+  const retryTimerRef = useRef<number | null>(null);
+  const connectedRef = useRef(false);
 
-  // Keep the ref current so the host's call handler sees the latest stream.
   useEffect(() => {
     localStreamRef.current = localStream;
   }, [localStream]);
 
+  const clearHandshakeTimer = useCallback(() => {
+    if (handshakeTimerRef.current !== null) {
+      window.clearTimeout(handshakeTimerRef.current);
+      handshakeTimerRef.current = null;
+    }
+  }, []);
+
+  const clearRetryTimer = useCallback(() => {
+    if (retryTimerRef.current !== null) {
+      window.clearTimeout(retryTimerRef.current);
+      retryTimerRef.current = null;
+    }
+  }, []);
+
   const cleanup = useCallback(() => {
+    clearHandshakeTimer();
+    clearRetryTimer();
     if (mediaConnRef.current) {
       try {
         mediaConnRef.current.close();
@@ -73,7 +99,9 @@ export function usePeerConnection({
       }
       peerRef.current = null;
     }
-  }, []);
+    connectedRef.current = false;
+    retryCountRef.current = 0;
+  }, [clearHandshakeTimer, clearRetryTimer]);
 
   const sendData = useCallback((data: unknown) => {
     if (dataConnRef.current && dataConnRef.current.open) {
@@ -86,15 +114,88 @@ export function usePeerConnection({
 
     setStatus("initializing");
     setError(null);
+    connectedRef.current = false;
+    retryCountRef.current = 0;
 
-    const peerId = isHost ? roomId : `${roomId}-guest-${Math.random().toString(36).slice(2, 8)}`;
+    const peerId = isHost
+      ? roomId
+      : `${roomId}-guest-${Math.random().toString(36).slice(2, 8)}`;
+
     const peer = new Peer(peerId, {
-      debug: 1,
+      debug: 2,
+      config: {
+        iceServers: ICE_SERVERS,
+        iceTransportPolicy: "all" as const,
+      },
     });
     peerRef.current = peer;
 
     const handleRemoteStream = (stream: MediaStream) => {
+      connectedRef.current = true;
+      clearHandshakeTimer();
+      clearRetryTimer();
       onRemoteStream?.(stream);
+    };
+
+    const startHandshakeTimer = () => {
+      clearHandshakeTimer();
+      handshakeTimerRef.current = window.setTimeout(() => {
+        if (!connectedRef.current) {
+          // eslint-disable-next-line no-console
+          console.warn("[peer] handshake timed out, retrying…");
+          if (retryCountRef.current < MAX_RETRIES) {
+            retryCountRef.current += 1;
+            setStatus("connecting");
+            // Close existing media connection but keep the peer alive
+            if (mediaConnRef.current) {
+              try {
+                mediaConnRef.current.close();
+              } catch {
+                // ignore
+              }
+              mediaConnRef.current = null;
+            }
+            // Retry after short delay
+            retryTimerRef.current = window.setTimeout(() => {
+              if (!connectedRef.current && peerRef.current && !isHost) {
+                // eslint-disable-next-line no-console
+                console.log(
+                  `[peer] retry #${retryCountRef.current} calling host…`,
+                );
+                const call = peerRef.current.call(
+                  roomId,
+                  localStreamRef.current!,
+                  {
+                    metadata: { type: "media", retry: retryCountRef.current },
+                  },
+                );
+                if (call) {
+                  mediaConnRef.current = call;
+                  call.on("stream", (remoteStream) => {
+                    handleRemoteStream(remoteStream);
+                    setStatus("connected");
+                  });
+                  call.on("error", (err) => {
+                    console.error("[peer] retry call error", err);
+                  });
+                  call.on("close", () => {
+                    if (!connectedRef.current) {
+                      setStatus("disconnected");
+                      onRemoteEnd?.();
+                    }
+                  });
+                }
+                startHandshakeTimer();
+              }
+            }, 1500);
+          } else {
+            setError(
+              "Connection is taking too long. Check your network or try again.",
+            );
+            setStatus("error");
+          }
+        }
+      }, HANDSHAKE_TIMEOUT_MS);
     };
 
     // ---- Host: wait for incoming call ----
@@ -114,25 +215,38 @@ export function usePeerConnection({
         conn.on("data", (data) => {
           if (data === "end") onRemoteEnd?.();
         });
+        conn.on("error", (err) => {
+          console.error("[peer] data conn error", err);
+        });
 
         const call = peer.call(roomId, localStreamRef.current!, {
           metadata: { type: "media" },
         });
-        mediaConnRef.current = call;
-        call.on("stream", (remoteStream) => {
-          handleRemoteStream(remoteStream);
-          setStatus("connected");
-        });
-        call.on("error", (err) => {
-          // eslint-disable-next-line no-console
-          console.error("[peer] call error", err);
-          setError(`Connection failed: ${err.message || err.type || "unknown"}`);
-          setStatus("error");
-        });
-        call.on("close", () => {
-          setStatus("disconnected");
-          onRemoteEnd?.();
-        });
+        if (call) {
+          mediaConnRef.current = call;
+          call.on("stream", (remoteStream) => {
+            handleRemoteStream(remoteStream);
+            setStatus("connected");
+          });
+          call.on("error", (err) => {
+            // eslint-disable-next-line no-console
+            console.error("[peer] call error", err);
+            if (!connectedRef.current) {
+              setError(
+                `Connection failed: ${err.message || err.type || "unknown"}`,
+              );
+            }
+          });
+          call.on("close", () => {
+            if (!connectedRef.current) {
+              setStatus("disconnected");
+              onRemoteEnd?.();
+            }
+          });
+        }
+
+        // Start handshake timer for the guest
+        startHandshakeTimer();
       }
     });
 
@@ -149,8 +263,10 @@ export function usePeerConnection({
         if (data === "end") onRemoteEnd?.();
       });
       conn.on("close", () => {
-        setStatus("disconnected");
-        onRemoteEnd?.();
+        if (!connectedRef.current) {
+          setStatus("disconnected");
+          onRemoteEnd?.();
+        }
       });
     });
 
@@ -159,7 +275,9 @@ export function usePeerConnection({
       console.log("[peer] incoming media call");
       setStatus("connecting");
       mediaConnRef.current = call;
-      call.answer(localStreamRef.current!);
+      call.answer(localStreamRef.current!, {
+        sdpTransform: undefined,
+      });
       call.on("stream", (remoteStream) => {
         handleRemoteStream(remoteStream);
         setStatus("connected");
@@ -167,12 +285,17 @@ export function usePeerConnection({
       call.on("error", (err) => {
         // eslint-disable-next-line no-console
         console.error("[peer] answer error", err);
-        setError(`Connection failed: ${err.message || err.type || "unknown"}`);
-        setStatus("error");
+        if (!connectedRef.current) {
+          setError(
+            `Connection failed: ${err.message || err.type || "unknown"}`,
+          );
+        }
       });
       call.on("close", () => {
-        setStatus("disconnected");
-        onRemoteEnd?.();
+        if (!connectedRef.current) {
+          setStatus("disconnected");
+          onRemoteEnd?.();
+        }
       });
     });
 
@@ -183,18 +306,73 @@ export function usePeerConnection({
         err.type === "peer-unavailable"
           ? "The other person isn't in the room yet. Make sure they've opened the invitation link."
           : `Connection error: ${err.message || err.type || "unknown"}`;
-      setError(msg);
       if (err.type === "peer-unavailable") {
-        setStatus(isHost ? "waiting" : "connecting");
+        if (!isHost && retryCountRef.current < MAX_RETRIES) {
+          // Guest: retry calling the host
+          retryCountRef.current += 1;
+          setStatus("connecting");
+          // eslint-disable-next-line no-console
+          console.log(
+            `[peer] peer-unavailable, retry #${retryCountRef.current} in 3s…`,
+          );
+          retryTimerRef.current = window.setTimeout(() => {
+            if (
+              !connectedRef.current &&
+              peerRef.current &&
+              localStreamRef.current
+            ) {
+              const call = peerRef.current.call(
+                roomId,
+                localStreamRef.current,
+                { metadata: { type: "media", retry: retryCountRef.current } },
+              );
+              if (call) {
+                mediaConnRef.current = call;
+                call.on("stream", (remoteStream) => {
+                  handleRemoteStream(remoteStream);
+                  setStatus("connected");
+                });
+                call.on("error", (e) =>
+                  console.error("[peer] retry call error", e),
+                );
+                call.on("close", () => {
+                  if (!connectedRef.current) {
+                    setStatus("disconnected");
+                    onRemoteEnd?.();
+                  }
+                });
+              }
+              startHandshakeTimer();
+            }
+          }, 3000);
+        } else {
+          setError(msg);
+          setStatus(isHost ? "waiting" : "error");
+        }
+      } else if (err.type === "network" || err.type === "server-error") {
+        // Transient errors — attempt reconnect
+        try {
+          peer.reconnect();
+        } catch {
+          // ignore
+        }
+        if (!connectedRef.current) {
+          setStatus(isHost ? "waiting" : "connecting");
+        }
       } else {
-        setStatus("error");
+        setError(msg);
+        if (!connectedRef.current) {
+          setStatus("error");
+        }
       }
     });
 
     peer.on("disconnected", () => {
       // eslint-disable-next-line no-console
       console.log("[peer] disconnected from signaling server");
-      // Try to reconnect to the signaling server
+      if (!connectedRef.current) {
+        setStatus(isHost ? "waiting" : "connecting");
+      }
       try {
         peer.reconnect();
       } catch {
