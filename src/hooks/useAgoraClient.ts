@@ -34,6 +34,12 @@ const MAX_JOIN_RETRIES = 20;
 const BASE_RETRY_DELAY_MS = 1000;
 const MAX_RETRY_DELAY_MS = 30000;
 
+function generateUid(): number {
+  // Agora UIDs are uint32. Use 1–999,999,999 to avoid 0 (auto-assign)
+  // and collisions between host and guest.
+  return Math.floor(Math.random() * 999_999_999) + 1;
+}
+
 function getRetryDelay(attempt: number): number {
   const base = Math.min(
     BASE_RETRY_DELAY_MS * Math.pow(2, attempt - 1),
@@ -84,7 +90,7 @@ export function useAgoraClient({
   const remoteVideoTrackRef = useRef<IRemoteVideoTrack | null>(null);
   const remoteUsersRef = useRef<Map<string, IAgoraRTCRemoteUser>>(new Map());
   const tokenRenewalTimerRef = useRef<number | null>(null);
-  const currentUidRef = useRef<number>(0);
+  const uidRef = useRef<number>(generateUid());
 
   // Use refs for callbacks so joinChannel/scheduleRejoin don't depend on them
   // and we avoid stale-closure / circular-dependency issues.
@@ -355,7 +361,7 @@ export function useAgoraClient({
       client.on("token-privilege-will-expire", async () => {
         console.log("[agora] token-privilege-will-expire, renewing…");
         try {
-          const renewal = await fetchAgoraToken(channelRef.current, currentUidRef.current);
+          const renewal = await fetchAgoraToken(channelRef.current, uidRef.current);
           await client.renewToken(renewal.token);
           console.log("[agora] token renewed via will-expire event");
         } catch (err) {
@@ -366,7 +372,7 @@ export function useAgoraClient({
       client.on("token-privilege-did-expire", async () => {
         console.warn("[agora] token expired, attempting renewal…");
         try {
-          const renewal = await fetchAgoraToken(channelRef.current, currentUidRef.current);
+          const renewal = await fetchAgoraToken(channelRef.current, uidRef.current);
           await client.renewToken(renewal.token);
           console.log("[agora] token renewed after expiry");
         } catch (err) {
@@ -377,9 +383,11 @@ export function useAgoraClient({
       // Fetch a valid RTC token from the server before joining.
       // The Agora project has App Certificate enabled, so a static null
       // token triggers CAN_NOT_GET_GATEWAY_SERVER ("dynamic use static key").
+      const uid = uidRef.current;
+      console.log("[agora] joining channel:", channelRef.current, "uid:", uid, "isHost:", isHostRef.current);
       let tokenData;
       try {
-        tokenData = await fetchAgoraToken(channelRef.current, currentUidRef.current);
+        tokenData = await fetchAgoraToken(channelRef.current, uid);
       } catch (tokenErr) {
         console.error("[agora] token fetch failed", tokenErr);
         throw new Error(
@@ -387,13 +395,13 @@ export function useAgoraClient({
         );
       }
 
-      const assignedUid = await client.join(
+      // Use the exact UID + channel the token was generated for.
+      await client.join(
         tokenData.appId,
         tokenData.channelName,
         tokenData.token,
         tokenData.uid,
       );
-      currentUidRef.current = typeof assignedUid === "number" ? assignedUid : 0;
       joinedRef.current = true;
       setState("connecting");
 
@@ -404,7 +412,7 @@ export function useAgoraClient({
       tokenRenewalTimerRef.current = window.setTimeout(async () => {
         if (!joinedRef.current || !clientRef.current) return;
         try {
-          const renewal = await fetchAgoraToken(channelRef.current, currentUidRef.current);
+          const renewal = await fetchAgoraToken(channelRef.current, uidRef.current);
           await clientRef.current.renewToken(renewal.token);
           console.log("[agora] token renewed");
         } catch (err) {
