@@ -1,3 +1,5 @@
+import { createClient } from "jsr:@supabase/supabase-js@2";
+
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
@@ -203,6 +205,40 @@ function buildRtcToken(
   return token.build();
 }
 
+// ── Credential retrieval ────────────────────────────────────────────
+// Agora credentials are stored in the app_config table (RLS-protected,
+// server-only). The edge function uses the service role key to read them.
+
+async function getAgoraCredentials(): Promise<{ appId: string; appCert: string }> {
+  const supabaseUrl = Deno.env.get("SUPABASE_URL");
+  const serviceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+
+  if (!supabaseUrl || !serviceRoleKey) {
+    throw new Error("Missing Supabase configuration for edge function.");
+  }
+
+  const supabase = createClient(supabaseUrl, serviceRoleKey);
+
+  const { data, error } = await supabase
+    .from("app_config")
+    .select("key, value")
+    .in("key", ["AGORA_APP_ID", "AGORA_APP_CERTIFICATE"]);
+
+  if (error) {
+    throw new Error("Failed to read Agora credentials from database.");
+  }
+
+  const config = new Map(data.map((row) => [row.key, row.value]));
+  const appId = config.get("AGORA_APP_ID");
+  const appCert = config.get("AGORA_APP_CERTIFICATE");
+
+  if (!appId || !appCert) {
+    throw new Error("Agora credentials not found in database.");
+  }
+
+  return { appId, appCert };
+}
+
 // ── Main handler ─────────────────────────────────────────────────────
 
 Deno.serve(async (req: Request) => {
@@ -237,16 +273,7 @@ Deno.serve(async (req: Request) => {
       uid = 0;
     }
 
-    const appId = Deno.env.get("AGORA_APP_ID");
-    const appCert = Deno.env.get("AGORA_APP_CERTIFICATE");
-
-    if (!appId || !appCert) {
-      console.error("[agora-token] Missing AGORA_APP_ID or AGORA_APP_CERTIFICATE");
-      return new Response(
-        JSON.stringify({ error: "Server is not configured for Agora token generation" }),
-        { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } },
-      );
-    }
+    const { appId, appCert } = await getAgoraCredentials();
 
     const expireTs = Math.floor(Date.now() / 1000) + 3600;
 
