@@ -139,34 +139,36 @@ export default function HostScreen() {
     }
     const name = displayName.trim() || "Host";
 
-    // Create call record in Supabase
+    const callCode = accessCode;
     try {
-      const { error: insertError } = await supabase
-        .from("calls")
-        .insert({
-          access_code: accessCode,
-          channel_name: FIXED_CHANNEL,
-          status: "waiting",
-          host_display_name: name,
-        });
-      if (insertError) {
-        // If code already exists, generate a new one and retry
-        if (insertError.code === "23505") {
-          const newCode = generateAccessCode();
-          setAccessCode(newCode);
-          const { error: retryError } = await supabase
-            .from("calls")
-            .insert({
-              access_code: newCode,
-              channel_name: FIXED_CHANNEL,
-              status: "waiting",
-              host_display_name: name,
-            });
-          if (retryError) throw retryError;
-        } else {
-          throw insertError;
-        }
+      const insertCall = (code: string) =>
+        supabase
+          .from("calls")
+          .insert({
+            access_code: code,
+            channel_name: FIXED_CHANNEL,
+            status: "waiting",
+            host_display_name: name,
+          })
+          .select("id, access_code, channel_name, status")
+          .maybeSingle();
+
+      let { data: call, error: insertError } = await insertCall(callCode);
+      if (insertError?.code === "23505") {
+        const newCode = generateAccessCode();
+        setAccessCode(newCode);
+        ({ data: call, error: insertError } = await insertCall(newCode));
       }
+      console.log("[HOST] database response:", { data: call, error: insertError });
+      if (insertError) throw insertError;
+      if (!call) throw new Error("Call record was not returned after creation.");
+      console.log("[HOST] call created:", {
+        "call ID": call.id,
+        "room ID": call.access_code,
+        channel: call.channel_name,
+        status: call.status,
+        "invitation link": buildShareableLink(call.access_code),
+      });
     } catch (err) {
       console.error("[HOST] Failed to create call record:", err);
       setError("Could not start the call. Please try again.");

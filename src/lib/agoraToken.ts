@@ -1,3 +1,5 @@
+import { supabaseAnonKey, supabaseUrl } from "@/lib/supabase";
+
 /**
  * Fetches an Agora RTC token from the Supabase Edge Function.
  * The token is generated server-side using the Agora App Certificate,
@@ -15,8 +17,7 @@ export async function fetchAgoraToken(
   channel: string,
   uid: number,
 ): Promise<AgoraTokenResponse> {
-  const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
-  const anonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
+  const anonKey = supabaseAnonKey;
 
   if (!supabaseUrl || !anonKey) {
     throw new Error("Server configuration is missing.");

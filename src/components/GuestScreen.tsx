@@ -24,7 +24,7 @@ export default function GuestScreen({ accessCode }: { accessCode: string }) {
     let cancelled = false;
 
     const validate = async () => {
-      console.log("[GUEST] Validating access code:", accessCode);
+      console.log("[GUEST] received ID:", accessCode);
       try {
         const { data, error: queryError } = await supabase
           .from("calls")
@@ -34,25 +34,28 @@ export default function GuestScreen({ accessCode }: { accessCode: string }) {
 
         if (cancelled) return;
 
+        console.log("[GUEST] database response:", { data, error: queryError });
+        console.log("[GUEST] lookup result:", data ? "found" : "not found");
+
         if (queryError) {
-          console.error("[GUEST] Validation query error:", queryError);
+          console.error("[GUEST] validation result: error", queryError);
           setError("Could not verify the call. Please try again.");
           setPhase("incoming");
           return;
         }
 
         if (!data) {
-          console.warn("[GUEST] No call found for code:", accessCode);
+          console.warn("[GUEST] validation result: no call found for code", accessCode);
           setError("This call link is not valid.");
           setPhase("incoming");
           return;
         }
 
         const status = data.status as CallStatus;
-        console.log("[GUEST] Call found — status:", status, "channel:", data.channel_name);
+        console.log("[GUEST] validation result: ok — status:", status, "channel:", data.channel_name);
 
         if (status === "ended") {
-          console.warn("[GUEST] Call has already ended");
+          console.warn("[GUEST] validation result: call has already ended");
           setPhase("ended");
           return;
         }
