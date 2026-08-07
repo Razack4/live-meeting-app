@@ -154,10 +154,29 @@ export default function HostScreen() {
           .maybeSingle();
 
       let { data: call, error: insertError } = await insertCall(callCode);
+      console.log("[HOST][DIAG] first insert attempt:", {
+        callCode,
+        data: call,
+        error: insertError,
+        "error.code": insertError?.code,
+        "error.message": insertError?.message,
+        "error.details": insertError?.details,
+        "error.hint": insertError?.hint,
+        "supabaseUrl": import.meta.env.VITE_SUPABASE_URL || import.meta.env.SUPABASE_URL || "(undefined)",
+      });
       if (insertError?.code === "23505") {
         const newCode = generateAccessCode();
         setAccessCode(newCode);
         ({ data: call, error: insertError } = await insertCall(newCode));
+        console.log("[HOST][DIAG] retry insert attempt:", {
+          newCode,
+          data: call,
+          error: insertError,
+          "error.code": insertError?.code,
+          "error.message": insertError?.message,
+          "error.details": insertError?.details,
+          "error.hint": insertError?.hint,
+        });
       }
       console.log("[HOST] database response:", { data: call, error: insertError });
       if (insertError) throw insertError;
