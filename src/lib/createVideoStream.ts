@@ -2,7 +2,7 @@ import type { VideoSelection } from "@/types";
 
 /**
  * Creates a MediaStream from a pre-recorded video file using captureStream().
- * Returns a promise that resolves when the stream is ready with at least one track.
+ * Returns a promise that resolves when the stream is ready with at least one video track.
  */
 export function createVideoStream(
   selection: VideoSelection,
@@ -31,6 +31,7 @@ export function createVideoStream(
         extended.captureStream?.() ?? extended.mozCaptureStream?.();
       if (captured) {
         captured.getVideoTracks().forEach((t) => stream.addTrack(t));
+        captured.getAudioTracks().forEach((t) => stream.addTrack(t));
         if (stream.getVideoTracks().length > 0) {
           resolveReady();
         }

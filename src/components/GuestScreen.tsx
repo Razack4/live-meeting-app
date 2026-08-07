@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { AlertCircle, Phone, PhoneOff, Video } from "lucide-react";
+import { AlertCircle, Phone, Video } from "lucide-react";
 import VideoCall from "@/components/VideoCall";
 import { useAgoraClient } from "@/hooks/useAgoraClient";
 import type { ConnectionState } from "@/types";
 
-type GuestPhase = "incoming" | "connecting" | "active" | "ended";
+type GuestPhase = "incoming" | "connecting" | "active";
 
 interface ActiveSession {
   localStream: MediaStream;
@@ -12,15 +12,7 @@ interface ActiveSession {
 }
 
 export default function GuestScreen({ roomId }: { roomId: string }) {
-  const [phase, setPhase] = useState<GuestPhase>(() => {
-    try {
-      return localStorage.getItem(`call_ended_${roomId}`) === "true"
-        ? "ended"
-        : "incoming";
-    } catch {
-      return "incoming";
-    }
-  });
+  const [phase, setPhase] = useState<GuestPhase>("incoming");
   const [error, setError] = useState<string | null>(null);
   const [session, setSession] = useState<ActiveSession | null>(null);
   const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
@@ -32,13 +24,7 @@ export default function GuestScreen({ roomId }: { roomId: string }) {
 
   const handleRemoteEnd = useCallback(() => {
     setRemoteStream(null);
-    try {
-      localStorage.setItem(`call_ended_${roomId}`, "true");
-    } catch {
-      // localStorage may be unavailable in private browsing
-    }
-    setPhase("ended");
-  }, [roomId]);
+  }, []);
 
   const {
     state: connectionState,
@@ -46,6 +32,7 @@ export default function GuestScreen({ roomId }: { roomId: string }) {
     cleanup: agoraCleanup,
     toggleCamera,
     toggleMic,
+    resumeRemoteVideo,
   } = useAgoraClient({
     channel: session ? roomId : "",
     isHost: false,
@@ -104,32 +91,9 @@ export default function GuestScreen({ roomId }: { roomId: string }) {
     }
     setRemoteStream(null);
     setSession(null);
-    try {
-      localStorage.setItem(`call_ended_${roomId}`, "true");
-    } catch {
-      // localStorage may be unavailable in private browsing
-    }
-    setPhase("ended");
-  }, [agoraCleanup, roomId]);
+    setPhase("incoming");
+  }, [agoraCleanup]);
 
-  // ---- Ended screen (non-interactive) ----
-  if (phase === "ended") {
-    return (
-      <div className="fixed inset-0 bg-black flex flex-col items-center justify-center gap-6">
-        <div className="w-20 h-20 rounded-full bg-white/5 ring-1 ring-white/10 flex items-center justify-center">
-          <PhoneOff className="w-9 h-9 text-white/40" />
-        </div>
-        <div className="text-center">
-          <h1 className="text-2xl font-semibold text-white tracking-tight">
-            Call Ended
-          </h1>
-          <p className="mt-2 text-sm text-white/40">Appel terminé</p>
-        </div>
-      </div>
-    );
-  }
-
-  // ---- Active call ----
   if (phase === "active" && session) {
     return (
       <VideoCall
@@ -142,11 +106,11 @@ export default function GuestScreen({ roomId }: { roomId: string }) {
         onEnd={handleEnd}
         onToggleCamera={toggleCamera}
         onToggleMic={toggleMic}
+        onResumeRemoteVideo={resumeRemoteVideo}
       />
     );
   }
 
-  // ---- Incoming call screen ----
   return (
     <div className="min-h-dvh bg-black text-white flex flex-col items-center justify-center px-6">
       <div className="flex flex-col items-center gap-8">

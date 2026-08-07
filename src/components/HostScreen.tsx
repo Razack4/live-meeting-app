@@ -18,7 +18,7 @@ import {
 } from "@/types";
 import { createVideoStream } from "@/lib/createVideoStream";
 
-type HostPhase = "setup" | "active";
+type HostPhase = "setup" | "preparing" | "active";
 
 interface ActiveSession {
   localStream: MediaStream;
@@ -77,7 +77,7 @@ export default function HostScreen() {
     e.target.value = "";
   };
 
-  const handleDrop = (e: React.ChangeEvent<HTMLDivElement>) => {
+  const handleDrop = (e: React.DragEvent<HTMLDivElement>) => {
     e.preventDefault();
     setDragOver(false);
     const file = e.dataTransfer.files?.[0];
@@ -116,10 +116,22 @@ export default function HostScreen() {
     setLinkGenerated(true);
   };
 
-  const handleStartCall = () => {
+  const handleStartCall = async () => {
     if (!selection) return;
-    const { stream, cleanup } = createVideoStream(selection);
+    setPhase("preparing");
+    const { stream, cleanup, ready } = createVideoStream(selection);
     videoCleanupRef.current = cleanup;
+    try {
+      await ready;
+    } catch {
+      setError("Could not load the video. Please try a different file.");
+      setPhase("setup");
+      if (videoCleanupRef.current) {
+        videoCleanupRef.current();
+        videoCleanupRef.current = null;
+      }
+      return;
+    }
     const name = displayName.trim() || "Host";
     setSession({ localStream: stream, displayName: name, roomId });
     setPhase("active");
@@ -139,6 +151,7 @@ export default function HostScreen() {
     cleanup: agoraCleanup,
     toggleCamera,
     toggleMic,
+    resumeRemoteVideo,
   } = useAgoraClient({
     channel: session?.roomId ?? "",
     isHost: true,
@@ -163,7 +176,7 @@ export default function HostScreen() {
     setRoomId(generateRoomId());
   }, [session, agoraCleanup]);
 
-  if (phase === "active" && session) {
+  if ((phase === "active" || phase === "preparing") && session) {
     return (
       <VideoCall
         localStream={session.localStream}
@@ -175,6 +188,7 @@ export default function HostScreen() {
         onEnd={handleEnd}
         onToggleCamera={toggleCamera}
         onToggleMic={toggleMic}
+        onResumeRemoteVideo={resumeRemoteVideo}
       />
     );
   }
@@ -202,7 +216,6 @@ export default function HostScreen() {
             </span>
           </div>
 
-          {/* Step 1: File picker */}
           {!selection ? (
             <div
               onClick={() => inputRef.current?.click()}
@@ -271,7 +284,6 @@ export default function HostScreen() {
             </div>
           )}
 
-          {/* Step 2: Generate link */}
           {selection && !linkGenerated && (
             <button
               onClick={handleGenerateLink}
@@ -281,7 +293,6 @@ export default function HostScreen() {
             </button>
           )}
 
-          {/* Step 3: Link display + start */}
           {selection && linkGenerated && (
             <>
               <div className="rounded-2xl bg-white/5 ring-1 ring-white/10 p-4">

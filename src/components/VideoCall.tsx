@@ -20,6 +20,7 @@ interface VideoCallProps {
   onEnd: () => void;
   onToggleCamera: (on: boolean) => void;
   onToggleMic: (on: boolean) => void;
+  onResumeRemoteVideo?: () => void;
 }
 
 export default function VideoCall({
@@ -32,6 +33,7 @@ export default function VideoCall({
   onEnd,
   onToggleCamera,
   onToggleMic,
+  onResumeRemoteVideo,
 }: VideoCallProps) {
   const mainVideoRef = useRef<HTMLVideoElement>(null);
   const pipVideoRef = useRef<HTMLVideoElement>(null);
@@ -76,6 +78,38 @@ export default function VideoCall({
   useEffect(() => {
     onToggleCamera(videoOn);
   }, [videoOn, onToggleCamera]);
+
+  // BUG D: resume video elements when returning from background.
+  useEffect(() => {
+    const resumeAllVideo = () => {
+      [mainVideoRef.current, pipVideoRef.current].forEach((v) => {
+        if (v && v.paused) {
+          v.play().catch(() => {});
+        }
+      });
+      onResumeRemoteVideo?.();
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        resumeAllVideo();
+      }
+    };
+
+    const handlePageShow = () => {
+      resumeAllVideo();
+    };
+
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    window.addEventListener("pageshow", handlePageShow);
+    window.addEventListener("pagehide", handlePageShow);
+
+    return () => {
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      window.removeEventListener("pageshow", handlePageShow);
+      window.removeEventListener("pagehide", handlePageShow);
+    };
+  }, [onResumeRemoteVideo]);
 
   const handleEnd = () => {
     [mainVideoRef.current, pipVideoRef.current].forEach((v) => {
@@ -233,7 +267,7 @@ function ControlButton({ active, onClick, label, Icon }: ControlButtonProps) {
             : "bg-white/90 hover:bg-white text-slate-900"
         }`}
     >
-      <Icon className="w-5 h-5 sm:w-6 sm:h-6" />
+      <Icon className="w-5 h-5 sm:w-6 sm-h-6" />
     </button>
   );
 }

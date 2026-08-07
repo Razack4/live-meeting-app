@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import type { IRemoteVideoTrack } from "agora-rtc-sdk-ng";
 import {
   AgoraRTC,
   AGORA_APP_ID,
@@ -6,16 +7,17 @@ import {
   type IAgoraRTCRemoteUser,
   type IMicrophoneAudioTrack,
   type ICameraVideoTrack,
+  type ILocalTrack,
 } from "@/lib/agora";
 import type { ConnectionState } from "@/types";
 
 interface UseAgoraClientArgs {
   channel: string;
   isHost: boolean;
-  /** For host: a pre-recorded video stream. For guest: null (uses real camera). */
   localStream: MediaStream | null;
   onRemoteStream?: (stream: MediaStream) => void;
   onRemoteEnd?: () => void;
+  onRemoteVideoUpdate?: () => void;
 }
 
 export interface AgoraClient {
@@ -24,9 +26,10 @@ export interface AgoraClient {
   cleanup: () => void;
   toggleCamera: (on: boolean) => void;
   toggleMic: (on: boolean) => void;
+  resumeRemoteVideo: () => void;
 }
 
-const MAX_JOIN_RETRIES = 3;
+const MAX_JOIN_RETRIES = 5;
 const RETRY_DELAY_MS = 3000;
 
 export function useAgoraClient({
@@ -35,22 +38,34 @@ export function useAgoraClient({
   localStream,
   onRemoteStream,
   onRemoteEnd,
+  onRemoteVideoUpdate,
 }: UseAgoraClientArgs): AgoraClient {
   const [state, setState] = useState<ConnectionState>("idle");
   const [error, setError] = useState<string | null>(null);
 
   const clientRef = useRef<IAgoraRTCClient | null>(null);
-  const audioTrackRef = useRef<IMicrophoneAudioTrack | null>(null);
-  const videoTrackRef = useRef<ICameraVideoTrack | null>(null);
+  const audioTrackRef = useRef<ILocalTrack | null>(null);
+  const videoTrackRef = useRef<ILocalTrack | null>(null);
   const localStreamRef = useRef<MediaStream | null>(localStream);
   const joinedRef = useRef(false);
   const retryCountRef = useRef(0);
   const reconnectTimerRef = useRef<number | null>(null);
   const mountedRef = useRef(true);
+  const channelRef = useRef(channel);
+  const isHostRef = useRef(isHost);
+  const remoteVideoTrackRef = useRef<IRemoteVideoTrack | null>(null);
 
   useEffect(() => {
     localStreamRef.current = localStream;
   }, [localStream]);
+
+  useEffect(() => {
+    channelRef.current = channel;
+  }, [channel]);
+
+  useEffect(() => {
+    isHostRef.current = isHost;
+  }, [isHost]);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -77,6 +92,7 @@ export function useAgoraClient({
         ref.current = null;
       }
     });
+    remoteVideoTrackRef.current = null;
   }, []);
 
   const cleanup = useCallback(() => {
@@ -105,9 +121,11 @@ export function useAgoraClient({
         if (mediaType === "video") {
           const videoTrack = user.videoTrack;
           if (videoTrack) {
+            remoteVideoTrackRef.current = videoTrack;
             const stream = new MediaStream();
             stream.addTrack(videoTrack.getMediaStreamTrack());
             onRemoteStream?.(stream);
+            onRemoteVideoUpdate?.();
           }
         }
         if (mediaType === "audio") {
@@ -117,12 +135,13 @@ export function useAgoraClient({
         console.error("[agora] subscribe error", err);
       }
     },
-    [onRemoteStream],
+    [onRemoteStream, onRemoteVideoUpdate],
   );
 
   const handleRemoteUserUnpublished = useCallback(
     (_user: IAgoraRTCRemoteUser, mediaType: "audio" | "video") => {
       if (mediaType === "video") {
+        remoteVideoTrackRef.current = null;
         onRemoteEnd?.();
       }
     },
@@ -130,12 +149,29 @@ export function useAgoraClient({
   );
 
   const handleRemoteUserLeft = useCallback(() => {
+    remoteVideoTrackRef.current = null;
     onRemoteEnd?.();
   }, [onRemoteEnd]);
 
   const joinChannel = useCallback(async () => {
     if (!channel || !localStreamRef.current) return;
     if (joinedRef.current) return;
+
+    if (isHostRef.current) {
+      let attempts = 0;
+      while (
+        localStreamRef.current.getVideoTracks().length === 0 &&
+        attempts < 50
+      ) {
+        await new Promise((r) => setTimeout(r, 100));
+        attempts++;
+      }
+      if (localStreamRef.current.getVideoTracks().length === 0) {
+        setState("error");
+        setError("Video stream not ready. Please try again.");
+        return;
+      }
+    }
 
     setState("initializing");
     setError(null);
@@ -158,13 +194,28 @@ export function useAgoraClient({
       });
       client.on("user-left", handleRemoteUserLeft);
 
-      client.on("connection-state-change", (curState) => {
+      client.on("connection-state-change", (curState, prevState, reason) => {
         if (curState === "CONNECTED") {
           setState("connected");
+          retryCountRef.current = 0;
         } else if (curState === "RECONNECTING") {
           setState("reconnecting");
         } else if (curState === "DISCONNECTED") {
-          setState("disconnected");
+          console.warn("[agora] DISCONNECTED", reason);
+          setState("reconnecting");
+          if (mountedRef.current && joinedRef.current) {
+            joinedRef.current = false;
+            cleanupTracks();
+            if (clientRef.current) {
+              try {
+                clientRef.current.leave();
+              } catch {
+                // ignore
+              }
+              clientRef.current = null;
+            }
+            scheduleRejoin();
+          }
         }
       });
 
@@ -176,23 +227,40 @@ export function useAgoraClient({
       joinedRef.current = true;
       setState("connecting");
 
-      if (isHost) {
-        // Host: publish video from the pre-recorded stream
+      if (isHostRef.current) {
         const videoMediaTrack = localStreamRef.current.getVideoTracks()[0];
         if (videoMediaTrack) {
           const vTrack = AgoraRTC.createCustomVideoTrack({
             mediaStreamTrack: videoMediaTrack,
           });
-          videoTrackRef.current = vTrack as unknown as ICameraVideoTrack;
+          videoTrackRef.current = vTrack;
           await client.publish(vTrack);
         }
+        const audioMediaTrack = localStreamRef.current.getAudioTracks()[0];
+        if (audioMediaTrack) {
+          const aTrack = AgoraRTC.createCustomAudioTrack({
+            mediaStreamTrack: audioMediaTrack,
+          });
+          audioTrackRef.current = aTrack;
+          await client.publish(aTrack);
+        }
       } else {
-        // Guest: use real camera + microphone
-        const [micTrack, camTrack] =
-          await AgoraRTC.createMicrophoneAndCameraTracks();
-        audioTrackRef.current = micTrack;
-        videoTrackRef.current = camTrack;
-        await client.publish([micTrack, camTrack]);
+        const videoMediaTrack = localStreamRef.current.getVideoTracks()[0];
+        if (videoMediaTrack) {
+          const vTrack = AgoraRTC.createCustomVideoTrack({
+            mediaStreamTrack: videoMediaTrack,
+          });
+          videoTrackRef.current = vTrack;
+          await client.publish(vTrack);
+        }
+        const audioMediaTrack = localStreamRef.current.getAudioTracks()[0];
+        if (audioMediaTrack) {
+          const aTrack = AgoraRTC.createCustomAudioTrack({
+            mediaStreamTrack: audioMediaTrack,
+          });
+          audioTrackRef.current = aTrack;
+          await client.publish(aTrack);
+        }
       }
 
       if (mountedRef.current) {
@@ -208,30 +276,12 @@ export function useAgoraClient({
       setError(msg);
       setState("error");
 
-      // Auto-retry for transient failures
       if (retryCountRef.current < MAX_JOIN_RETRIES) {
-        retryCountRef.current += 1;
-        clearReconnectTimer();
-        reconnectTimerRef.current = window.setTimeout(() => {
-          if (mountedRef.current && !joinedRef.current) {
-            // Clean up any partial state before retrying
-            cleanupTracks();
-            if (clientRef.current) {
-              try {
-                clientRef.current.leave();
-              } catch {
-                // ignore
-              }
-              clientRef.current = null;
-            }
-            joinChannel();
-          }
-        }, RETRY_DELAY_MS);
+        scheduleRejoin();
       }
     }
   }, [
     channel,
-    isHost,
     handleRemoteUserPublished,
     handleRemoteUserUnpublished,
     handleRemoteUserLeft,
@@ -239,12 +289,35 @@ export function useAgoraClient({
     cleanupTracks,
   ]);
 
+  const scheduleRejoin = useCallback(() => {
+    if (retryCountRef.current >= MAX_JOIN_RETRIES) {
+      setState("error");
+      setError("Unable to reconnect. Please check your network.");
+      return;
+    }
+    retryCountRef.current += 1;
+    clearReconnectTimer();
+    reconnectTimerRef.current = window.setTimeout(() => {
+      if (mountedRef.current && !joinedRef.current) {
+        cleanupTracks();
+        if (clientRef.current) {
+          try {
+            clientRef.current.leave();
+          } catch {
+            // ignore
+          }
+          clientRef.current = null;
+        }
+        joinChannel();
+      }
+    }, RETRY_DELAY_MS);
+  }, [clearReconnectTimer, cleanupTracks, joinChannel]);
+
   useEffect(() => {
     if (!channel || !localStream) return;
 
     joinChannel();
 
-    // Detect network recovery and trigger rejoin if needed
     const handleOnline = () => {
       if (mountedRef.current && !joinedRef.current && clientRef.current === null) {
         retryCountRef.current = 0;
@@ -262,15 +335,31 @@ export function useAgoraClient({
 
   const toggleCamera = useCallback((on: boolean) => {
     if (videoTrackRef.current) {
-      videoTrackRef.current.setEnabled(on);
+      (videoTrackRef.current as { setEnabled: (v: boolean) => void }).setEnabled(on);
     }
   }, []);
 
   const toggleMic = useCallback((on: boolean) => {
     if (audioTrackRef.current) {
-      audioTrackRef.current.setEnabled(on);
+      (audioTrackRef.current as { setEnabled: (v: boolean) => void }).setEnabled(on);
     }
   }, []);
 
-  return { state, error, cleanup, toggleCamera, toggleMic };
+  const resumeRemoteVideo = useCallback(() => {
+    if (remoteVideoTrackRef.current) {
+      const stream = new MediaStream();
+      stream.addTrack(remoteVideoTrackRef.current.getMediaStreamTrack());
+      onRemoteStream?.(stream);
+      onRemoteVideoUpdate?.();
+    }
+  }, [onRemoteStream, onRemoteVideoUpdate]);
+
+  return {
+    state,
+    error,
+    cleanup,
+    toggleCamera,
+    toggleMic,
+    resumeRemoteVideo,
+  };
 }
