@@ -30,8 +30,17 @@ export interface AgoraClient {
   resumeRemoteVideo: () => void;
 }
 
-const MAX_JOIN_RETRIES = 5;
-const RETRY_DELAY_MS = 3000;
+const MAX_JOIN_RETRIES = 20;
+const BASE_RETRY_DELAY_MS = 1000;
+const MAX_RETRY_DELAY_MS = 30000;
+
+function getRetryDelay(attempt: number): number {
+  const base = Math.min(
+    BASE_RETRY_DELAY_MS * Math.pow(2, attempt - 1),
+    MAX_RETRY_DELAY_MS,
+  );
+  return base + Math.random() * 1000;
+}
 
 /**
  * Wait for a MediaStreamTrack to become "live", polling every 100ms up to
@@ -42,9 +51,11 @@ async function waitForLiveTrack(
   maxAttempts = 50,
 ): Promise<boolean> {
   if ((track.readyState as string) === "live") return true;
+  if ((track.readyState as string) === "ended") return false;
   for (let i = 0; i < maxAttempts; i++) {
     await new Promise((r) => setTimeout(r, 100));
     if ((track.readyState as string) === "live") return true;
+    if ((track.readyState as string) === "ended") return false;
   }
   return (track.readyState as string) === "live";
 }
@@ -124,7 +135,16 @@ export function useAgoraClient({
     }
   }, []);
 
-  const cleanupTracks = useCallback(() => {
+  // Clear track refs WITHOUT stopping underlying MediaStreamTracks.
+  // Used during reconnection so tracks stay alive for re-publishing.
+  const detachTracks = useCallback(() => {
+    videoTrackRef.current = null;
+    audioTrackRef.current = null;
+    remoteVideoTrackRef.current = null;
+  }, []);
+
+  // Stop and clear all tracks. Used when the user ends the call.
+  const destroyTracks = useCallback(() => {
     [audioTrackRef, videoTrackRef].forEach((ref) => {
       if (ref.current) {
         try {
@@ -141,7 +161,7 @@ export function useAgoraClient({
   const cleanup = useCallback(() => {
     clearReconnectTimer();
     clearTokenRenewalTimer();
-    cleanupTracks();
+    destroyTracks();
     if (clientRef.current) {
       try {
         clientRef.current.leave();
@@ -153,7 +173,7 @@ export function useAgoraClient({
     joinedRef.current = false;
     retryCountRef.current = 0;
     remoteUsersRef.current.clear();
-  }, [clearReconnectTimer, clearTokenRenewalTimer, cleanupTracks]);
+  }, [clearReconnectTimer, clearTokenRenewalTimer, destroyTracks]);
 
   // Forward declarations via refs so joinChannel and scheduleRejoin can
   // reference each other without a circular useCallback dependency.
@@ -189,7 +209,7 @@ export function useAgoraClient({
     [],
   );
 
-  // BUG 5: user-unpublished(video) should NOT end the call.
+  // user-unpublished(video) should NOT end the call.
   // Just clear the remote video; keep the call alive.
   const handleRemoteUserUnpublished = useCallback(
     (user: IAgoraRTCRemoteUser, mediaType: "audio" | "video") => {
@@ -201,7 +221,7 @@ export function useAgoraClient({
     [],
   );
 
-  // BUG 5: user-left shows "waiting" — does NOT permanently end.
+  // user-left shows "waiting" — does NOT permanently end.
   // We clear remote video but keep the call alive so the user can wait.
   const handleRemoteUserLeft = useCallback(
     (user: IAgoraRTCRemoteUser) => {
@@ -221,10 +241,17 @@ export function useAgoraClient({
     }
     retryCountRef.current += 1;
     clearReconnectTimer();
-    console.log("[agora] reconnecting — attempt", retryCountRef.current);
+    const delay = getRetryDelay(retryCountRef.current);
+    console.log(
+      "[agora] reconnecting — attempt",
+      retryCountRef.current,
+      "in",
+      Math.round(delay),
+      "ms",
+    );
     reconnectTimerRef.current = window.setTimeout(() => {
       if (mountedRef.current && !joinedRef.current) {
-        cleanupTracks();
+        detachTracks();
         if (clientRef.current) {
           try {
             clientRef.current.leave();
@@ -235,8 +262,8 @@ export function useAgoraClient({
         }
         joinChannelRef.current();
       }
-    }, RETRY_DELAY_MS);
-  }, [clearReconnectTimer, cleanupTracks]);
+    }, delay);
+  }, [clearReconnectTimer, detachTracks]);
 
   // Keep the ref in sync so joinChannel can call scheduleRejoin.
   useEffect(() => {
@@ -247,7 +274,7 @@ export function useAgoraClient({
     if (!channelRef.current || !localStreamRef.current) return;
     if (joinedRef.current) return;
 
-    // BUG 1: For host, ensure the stream has an active "live" video track
+    // For host, ensure the stream has an active "live" video track
     // before creating the Agora client or joining the channel.
     if (isHostRef.current) {
       let attempts = 0;
@@ -307,7 +334,7 @@ export function useAgoraClient({
           setState("reconnecting");
           if (mountedRef.current && joinedRef.current) {
             joinedRef.current = false;
-            cleanupTracks();
+            detachTracks();
             if (clientRef.current) {
               try {
                 clientRef.current.leave();
@@ -377,7 +404,7 @@ export function useAgoraClient({
       tokenRenewalTimerRef.current = window.setTimeout(async () => {
         if (!joinedRef.current || !clientRef.current) return;
         try {
-          const renewal = await fetchAgoraToken(channelRef.current, tokenData.uid);
+          const renewal = await fetchAgoraToken(channelRef.current, currentUidRef.current);
           await clientRef.current.renewToken(renewal.token);
           console.log("[agora] token renewed");
         } catch (err) {
@@ -385,7 +412,7 @@ export function useAgoraClient({
         }
       }, renewIn);
 
-      // BUG 1: Before publishing, verify the MediaStreamTrack exists and is
+      // Before publishing, verify the MediaStreamTrack exists and is
       // readyState === "live". Block publishing and wait if not ready.
       const publishLocalTracks = async () => {
         const stream = localStreamRef.current;
@@ -431,16 +458,17 @@ export function useAgoraClient({
       console.error("[agora] join failed", err);
       if (!mountedRef.current) return;
 
-      const msg =
-        err instanceof Error ? err.message : "Failed to join call";
-      setError(msg);
-      setState("error");
-
       if (retryCountRef.current < MAX_JOIN_RETRIES) {
+        setState("reconnecting");
         scheduleRejoinRef.current();
+      } else {
+        const msg =
+          err instanceof Error ? err.message : "Failed to join call";
+        setError(msg);
+        setState("error");
       }
     }
-  }, [handleRemoteUserPublished, handleRemoteUserUnpublished, handleRemoteUserLeft, cleanupTracks, clearTokenRenewalTimer]);
+  }, [handleRemoteUserPublished, handleRemoteUserUnpublished, handleRemoteUserLeft, detachTracks, clearTokenRenewalTimer]);
 
   // Keep the ref in sync so scheduleRejoin can call joinChannel.
   useEffect(() => {
