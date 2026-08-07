@@ -2,11 +2,11 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { IRemoteVideoTrack } from "agora-rtc-sdk-ng";
 import {
   AgoraRTC,
-  AGORA_APP_ID,
   type IAgoraRTCClient,
   type IAgoraRTCRemoteUser,
   type ILocalTrack,
 } from "@/lib/agora";
+import { fetchAgoraToken } from "@/lib/agoraToken";
 import type { ConnectionState } from "@/types";
 
 interface UseAgoraClientArgs {
@@ -72,6 +72,8 @@ export function useAgoraClient({
   const isHostRef = useRef(isHost);
   const remoteVideoTrackRef = useRef<IRemoteVideoTrack | null>(null);
   const remoteUsersRef = useRef<Map<string, IAgoraRTCRemoteUser>>(new Map());
+  const tokenRenewalTimerRef = useRef<number | null>(null);
+  const currentUidRef = useRef<number>(0);
 
   // Use refs for callbacks so joinChannel/scheduleRejoin don't depend on them
   // and we avoid stale-closure / circular-dependency issues.
@@ -115,6 +117,13 @@ export function useAgoraClient({
     }
   }, []);
 
+  const clearTokenRenewalTimer = useCallback(() => {
+    if (tokenRenewalTimerRef.current !== null) {
+      window.clearTimeout(tokenRenewalTimerRef.current);
+      tokenRenewalTimerRef.current = null;
+    }
+  }, []);
+
   const cleanupTracks = useCallback(() => {
     [audioTrackRef, videoTrackRef].forEach((ref) => {
       if (ref.current) {
@@ -131,6 +140,7 @@ export function useAgoraClient({
 
   const cleanup = useCallback(() => {
     clearReconnectTimer();
+    clearTokenRenewalTimer();
     cleanupTracks();
     if (clientRef.current) {
       try {
@@ -143,7 +153,7 @@ export function useAgoraClient({
     joinedRef.current = false;
     retryCountRef.current = 0;
     remoteUsersRef.current.clear();
-  }, [clearReconnectTimer, cleanupTracks]);
+  }, [clearReconnectTimer, clearTokenRenewalTimer, cleanupTracks]);
 
   // Forward declarations via refs so joinChannel and scheduleRejoin can
   // reference each other without a circular useCallback dependency.
@@ -315,9 +325,65 @@ export function useAgoraClient({
         console.warn("[agora] exception", event);
       });
 
-      await client.join(AGORA_APP_ID, channelRef.current, null, null);
+      client.on("token-privilege-will-expire", async () => {
+        console.log("[agora] token-privilege-will-expire, renewing…");
+        try {
+          const renewal = await fetchAgoraToken(channelRef.current, currentUidRef.current);
+          await client.renewToken(renewal.token);
+          console.log("[agora] token renewed via will-expire event");
+        } catch (err) {
+          console.warn("[agora] token renewal (will-expire) failed", err);
+        }
+      });
+
+      client.on("token-privilege-did-expire", async () => {
+        console.warn("[agora] token expired, attempting renewal…");
+        try {
+          const renewal = await fetchAgoraToken(channelRef.current, currentUidRef.current);
+          await client.renewToken(renewal.token);
+          console.log("[agora] token renewed after expiry");
+        } catch (err) {
+          console.warn("[agora] token renewal (did-expire) failed", err);
+        }
+      });
+
+      // Fetch a valid RTC token from the server before joining.
+      // The Agora project has App Certificate enabled, so a static null
+      // token triggers CAN_NOT_GET_GATEWAY_SERVER ("dynamic use static key").
+      let tokenData;
+      try {
+        tokenData = await fetchAgoraToken(channelRef.current, currentUidRef.current);
+      } catch (tokenErr) {
+        console.error("[agora] token fetch failed", tokenErr);
+        throw new Error(
+          "Could not authenticate with the call service. Please try again.",
+        );
+      }
+
+      const assignedUid = await client.join(
+        tokenData.appId,
+        tokenData.channelName,
+        tokenData.token,
+        tokenData.uid,
+      );
+      currentUidRef.current = typeof assignedUid === "number" ? assignedUid : 0;
       joinedRef.current = true;
       setState("connecting");
+
+      // Schedule token renewal 5 minutes before expiry
+      const msUntilExpiry = (tokenData.expireTs - Math.floor(Date.now() / 1000)) * 1000;
+      const renewIn = Math.max(msUntilExpiry - 300_000, 60_000);
+      clearTokenRenewalTimer();
+      tokenRenewalTimerRef.current = window.setTimeout(async () => {
+        if (!joinedRef.current || !clientRef.current) return;
+        try {
+          const renewal = await fetchAgoraToken(channelRef.current, tokenData.uid);
+          await clientRef.current.renewToken(renewal.token);
+          console.log("[agora] token renewed");
+        } catch (err) {
+          console.warn("[agora] token renewal failed", err);
+        }
+      }, renewIn);
 
       // BUG 1: Before publishing, verify the MediaStreamTrack exists and is
       // readyState === "live". Block publishing and wait if not ready.
@@ -374,7 +440,7 @@ export function useAgoraClient({
         scheduleRejoinRef.current();
       }
     }
-  }, [handleRemoteUserPublished, handleRemoteUserUnpublished, handleRemoteUserLeft, cleanupTracks]);
+  }, [handleRemoteUserPublished, handleRemoteUserUnpublished, handleRemoteUserLeft, cleanupTracks, clearTokenRenewalTimer]);
 
   // Keep the ref in sync so scheduleRejoin can call joinChannel.
   useEffect(() => {
