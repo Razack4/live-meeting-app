@@ -41,6 +41,7 @@ export default function HostScreen() {
   const inputRef = useRef<HTMLInputElement>(null);
   const previewRef = useRef<HTMLVideoElement>(null);
   const videoCleanupRef = useRef<(() => void) | null>(null);
+  const videoResumeRef = useRef<(() => void) | null>(null);
 
   const revokeUrl = useCallback((url: string) => {
     URL.revokeObjectURL(url);
@@ -119,9 +120,11 @@ export default function HostScreen() {
   const handleStartCall = async () => {
     if (!selection) return;
     setPhase("preparing");
-    const { stream, cleanup, ready } = createVideoStream(selection);
+    const { stream, cleanup, ready, resume } = createVideoStream(selection);
     videoCleanupRef.current = cleanup;
+    videoResumeRef.current = resume;
     try {
+      // BUG B: wait for the stream to have video tracks before joining Agora.
       await ready;
     } catch {
       setError("Could not load the video. Please try a different file.");
@@ -130,6 +133,7 @@ export default function HostScreen() {
         videoCleanupRef.current();
         videoCleanupRef.current = null;
       }
+      videoResumeRef.current = null;
       return;
     }
     const name = displayName.trim() || "Host";
@@ -169,6 +173,7 @@ export default function HostScreen() {
       videoCleanupRef.current();
       videoCleanupRef.current = null;
     }
+    videoResumeRef.current = null;
     setRemoteStream(null);
     setSession(null);
     setPhase("setup");
@@ -189,6 +194,7 @@ export default function HostScreen() {
         onToggleCamera={toggleCamera}
         onToggleMic={toggleMic}
         onResumeRemoteVideo={resumeRemoteVideo}
+        onResumeSourceVideo={videoResumeRef.current}
       />
     );
   }
@@ -216,6 +222,7 @@ export default function HostScreen() {
             </span>
           </div>
 
+          {/* Step 1: File picker */}
           {!selection ? (
             <div
               onClick={() => inputRef.current?.click()}
@@ -284,6 +291,7 @@ export default function HostScreen() {
             </div>
           )}
 
+          {/* Step 2: Generate link */}
           {selection && !linkGenerated && (
             <button
               onClick={handleGenerateLink}
@@ -293,6 +301,7 @@ export default function HostScreen() {
             </button>
           )}
 
+          {/* Step 3: Link display + start */}
           {selection && linkGenerated && (
             <>
               <div className="rounded-2xl bg-white/5 ring-1 ring-white/10 p-4">

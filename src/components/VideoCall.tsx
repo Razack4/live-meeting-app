@@ -21,6 +21,8 @@ interface VideoCallProps {
   onToggleCamera: (on: boolean) => void;
   onToggleMic: (on: boolean) => void;
   onResumeRemoteVideo?: () => void;
+  /** Called when returning to foreground to resume the hidden source video. */
+  onResumeSourceVideo?: (() => void) | null;
 }
 
 export default function VideoCall({
@@ -34,6 +36,7 @@ export default function VideoCall({
   onToggleCamera,
   onToggleMic,
   onResumeRemoteVideo,
+  onResumeSourceVideo,
 }: VideoCallProps) {
   const mainVideoRef = useRef<HTMLVideoElement>(null);
   const pipVideoRef = useRef<HTMLVideoElement>(null);
@@ -79,7 +82,10 @@ export default function VideoCall({
     onToggleCamera(videoOn);
   }, [videoOn, onToggleCamera]);
 
-  // BUG D: resume video elements when returning from background.
+  // BUG 3: resume video elements when returning from background.
+  // Browsers pause <video> elements and throttle timers when tab is hidden.
+  // pagehide = going TO background — do NOT resume there.
+  // pageshow / visibilitychange(visible) = returning FROM background — resume.
   useEffect(() => {
     const resumeAllVideo = () => {
       [mainVideoRef.current, pipVideoRef.current].forEach((v) => {
@@ -88,6 +94,7 @@ export default function VideoCall({
         }
       });
       onResumeRemoteVideo?.();
+      onResumeSourceVideo?.();
     };
 
     const handleVisibilityChange = () => {
@@ -102,14 +109,12 @@ export default function VideoCall({
 
     document.addEventListener("visibilitychange", handleVisibilityChange);
     window.addEventListener("pageshow", handlePageShow);
-    window.addEventListener("pagehide", handlePageShow);
 
     return () => {
       document.removeEventListener("visibilitychange", handleVisibilityChange);
       window.removeEventListener("pageshow", handlePageShow);
-      window.removeEventListener("pagehide", handlePageShow);
     };
-  }, [onResumeRemoteVideo]);
+  }, [onResumeRemoteVideo, onResumeSourceVideo]);
 
   const handleEnd = () => {
     [mainVideoRef.current, pipVideoRef.current].forEach((v) => {
@@ -267,7 +272,7 @@ function ControlButton({ active, onClick, label, Icon }: ControlButtonProps) {
             : "bg-white/90 hover:bg-white text-slate-900"
         }`}
     >
-      <Icon className="w-5 h-5 sm:w-6 sm-h-6" />
+      <Icon className="w-5 h-5 sm:w-6 sm:h-6" />
     </button>
   );
 }
