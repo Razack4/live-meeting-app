@@ -51,6 +51,7 @@ export function createVideoStream(
   let capturedStream: MediaStream | null = null;
 
   const attachCapture = () => {
+    if (capturedStream) return;
     if (video.readyState < HAVE_ENOUGH_DATA) return;
     try {
       const extended = video as HTMLVideoElement & {
