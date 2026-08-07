@@ -1,12 +1,12 @@
-import { getRoomIdFromUrl } from "@/types";
+import { getAccessCodeFromUrl } from "@/types";
 import HostScreen from "@/components/HostScreen";
 import GuestScreen from "@/components/GuestScreen";
 
 export default function App() {
-  const roomId = getRoomIdFromUrl();
+  const accessCode = getAccessCodeFromUrl();
 
-  if (roomId) {
-    return <GuestScreen roomId={roomId} />;
+  if (accessCode) {
+    return <GuestScreen accessCode={accessCode} />;
   }
 
   return <HostScreen />;
