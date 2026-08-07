@@ -35,8 +35,6 @@ const BASE_RETRY_DELAY_MS = 1000;
 const MAX_RETRY_DELAY_MS = 30000;
 
 function generateUid(): number {
-  // Agora UIDs are uint32. Use 1–999,999,999 to avoid 0 (auto-assign)
-  // and collisions between host and guest.
   return Math.floor(Math.random() * 999_999_999) + 1;
 }
 
@@ -48,10 +46,6 @@ function getRetryDelay(attempt: number): number {
   return base + Math.random() * 1000;
 }
 
-/**
- * Wait for a MediaStreamTrack to become "live", polling every 100ms up to
- * maxAttempts. Returns true if the track is live, false on timeout.
- */
 async function waitForLiveTrack(
   track: MediaStreamTrack,
   maxAttempts = 50,
@@ -74,6 +68,7 @@ export function useAgoraClient({
   onRemoteEnd,
   onRemoteVideoUpdate,
 }: UseAgoraClientArgs): AgoraClient {
+  const role = isHost ? "HOST" : "GUEST";
   const [state, setState] = useState<ConnectionState>("idle");
   const [error, setError] = useState<string | null>(null);
 
@@ -92,8 +87,6 @@ export function useAgoraClient({
   const tokenRenewalTimerRef = useRef<number | null>(null);
   const uidRef = useRef<number>(generateUid());
 
-  // Use refs for callbacks so joinChannel/scheduleRejoin don't depend on them
-  // and we avoid stale-closure / circular-dependency issues.
   const onRemoteStreamRef = useRef(onRemoteStream);
   const onRemoteEndRef = useRef(onRemoteEnd);
   const onRemoteVideoUpdateRef = useRef(onRemoteVideoUpdate);
@@ -141,15 +134,12 @@ export function useAgoraClient({
     }
   }, []);
 
-  // Clear track refs WITHOUT stopping underlying MediaStreamTracks.
-  // Used during reconnection so tracks stay alive for re-publishing.
   const detachTracks = useCallback(() => {
     videoTrackRef.current = null;
     audioTrackRef.current = null;
     remoteVideoTrackRef.current = null;
   }, []);
 
-  // Stop and clear all tracks. Used when the user ends the call.
   const destroyTracks = useCallback(() => {
     [audioTrackRef, videoTrackRef].forEach((ref) => {
       if (ref.current) {
@@ -181,8 +171,6 @@ export function useAgoraClient({
     remoteUsersRef.current.clear();
   }, [clearReconnectTimer, clearTokenRenewalTimer, destroyTracks]);
 
-  // Forward declarations via refs so joinChannel and scheduleRejoin can
-  // reference each other without a circular useCallback dependency.
   const joinChannelRef = useRef<() => Promise<void>>(async () => {});
   const scheduleRejoinRef = useRef<() => void>(() => {});
 
@@ -192,9 +180,10 @@ export function useAgoraClient({
       user: IAgoraRTCRemoteUser,
       mediaType: "audio" | "video",
     ) => {
+      console.log(`[${role}] subscribe — uid: ${user.uid}, mediaType: ${mediaType}`);
       try {
         await client.subscribe(user, mediaType);
-        console.log("[AGORA SUBSCRIBE] success — uid:", user.uid, "mediaType:", mediaType);
+        console.log(`[${role}] subscribe SUCCESS — uid: ${user.uid}, mediaType: ${mediaType}`);
         if (mediaType === "video") {
           const videoTrack = user.videoTrack;
           if (videoTrack) {
@@ -202,50 +191,48 @@ export function useAgoraClient({
             remoteUsersRef.current.set(user.uid.toString(), user);
             const stream = new MediaStream();
             stream.addTrack(videoTrack.getMediaStreamTrack());
-            console.log("[AGORA SUBSCRIBE] video track attached, calling onRemoteStream");
+            console.log(`[${role}] remote video track attached, calling onRemoteStream`);
             onRemoteStreamRef.current?.(stream);
             onRemoteVideoUpdateRef.current?.();
           } else {
-            console.warn("[AGORA SUBSCRIBE] user.videoTrack is null after subscribe");
+            console.warn(`[${role}] user.videoTrack is null after subscribe`);
           }
         }
         if (mediaType === "audio") {
           user.audioTrack?.play();
-          console.log("[AGORA SUBSCRIBE] audio track playing");
+          console.log(`[${role}] remote audio track playing`);
         }
       } catch (err) {
-        console.error("[AGORA SUBSCRIBE] failure — uid:", user.uid, "mediaType:", mediaType, "error:", err);
+        console.error(`[${role}] subscribe FAILED — uid: ${user.uid}, mediaType: ${mediaType}, error:`, err);
       }
     },
-    [],
+    [role],
   );
 
-  // BUG 5: user-unpublished(video) should NOT end the call.
-  // Just clear the remote video; keep the call alive.
   const handleRemoteUserUnpublished = useCallback(
     (user: IAgoraRTCRemoteUser, mediaType: "audio" | "video") => {
+      console.log(`[${role}] user-unpublished — uid: ${user.uid}, mediaType: ${mediaType}`);
       if (mediaType === "video") {
         remoteVideoTrackRef.current = null;
         onRemoteEndRef.current?.();
       }
     },
-    [],
+    [role],
   );
 
-  // BUG 5: user-left shows "waiting" — does NOT permanently end.
-  // We clear remote video but keep the call alive so the user can wait.
   const handleRemoteUserLeft = useCallback(
     (user: IAgoraRTCRemoteUser) => {
+      console.log(`[${role}] user-left — uid: ${user.uid}`);
       remoteUsersRef.current.delete(user.uid.toString());
       remoteVideoTrackRef.current = null;
       onRemoteEndRef.current?.();
     },
-    [],
+    [role],
   );
 
   const scheduleRejoin = useCallback(() => {
     if (retryCountRef.current >= MAX_JOIN_RETRIES) {
-      console.error("[agora] reconnect failed — max retries exceeded");
+      console.error(`[${role}] reconnect FAILED — max retries exceeded`);
       setState("error");
       setError("Unable to reconnect. Please check your network.");
       return;
@@ -253,13 +240,7 @@ export function useAgoraClient({
     retryCountRef.current += 1;
     clearReconnectTimer();
     const delay = getRetryDelay(retryCountRef.current);
-    console.log(
-      "[agora] reconnecting — attempt",
-      retryCountRef.current,
-      "in",
-      Math.round(delay),
-      "ms",
-    );
+    console.log(`[${role}] reconnecting — attempt ${retryCountRef.current} in ${Math.round(delay)}ms`);
     reconnectTimerRef.current = window.setTimeout(() => {
       if (mountedRef.current && !joinedRef.current) {
         detachTracks();
@@ -274,19 +255,23 @@ export function useAgoraClient({
         joinChannelRef.current();
       }
     }, delay);
-  }, [clearReconnectTimer, detachTracks]);
+  }, [clearReconnectTimer, detachTracks, role]);
 
-  // Keep the ref in sync so joinChannel can call scheduleRejoin.
   useEffect(() => {
     scheduleRejoinRef.current = scheduleRejoin;
   }, [scheduleRejoin]);
 
   const joinChannel = useCallback(async () => {
-    if (!channelRef.current || !localStreamRef.current) return;
-    if (joinedRef.current) return;
+    if (!channelRef.current || !localStreamRef.current) {
+      console.warn(`[${role}] join aborted — missing channel or localStream`);
+      return;
+    }
+    if (joinedRef.current) {
+      console.warn(`[${role}] join aborted — already joined`);
+      return;
+    }
 
-    // BUG 1: For host, ensure the stream has an active "live" video track
-    // before creating the Agora client or joining the channel.
+    // For host, ensure the stream has an active "live" video track before joining.
     if (isHostRef.current) {
       let attempts = 0;
       while (
@@ -298,17 +283,19 @@ export function useAgoraClient({
       }
       const videoTrack = localStreamRef.current.getVideoTracks()[0];
       if (!videoTrack) {
+        console.error(`[${role}] no video track in stream`);
         setState("error");
         setError("Video stream not ready. Please try again.");
         return;
       }
-      // Verify track.readyState === "live" before proceeding.
       const isLive = await waitForLiveTrack(videoTrack);
       if (!isLive) {
+        console.error(`[${role}] video track not live`);
         setState("error");
         setError("Video track is not active. Please try again.");
         return;
       }
+      console.log(`[${role}] video track is live, proceeding`);
     }
 
     setState("initializing");
@@ -319,33 +306,34 @@ export function useAgoraClient({
 
       const client = AgoraRTC.createClient({ mode: "rtc", codec: "vp8" });
       clientRef.current = client;
+      console.log(`[${role}] Agora client created`);
 
       client.on("user-joined", (user) => {
-        console.log("[AGORA user-joined] uid:", user.uid);
+        console.log(`[${role}] user-joined — uid: ${user.uid}`);
       });
       client.on("user-published", (user, mediaType) => {
         if (clientRef.current !== client) return;
-        console.log("[AGORA user-published] uid:", user.uid, "mediaType:", mediaType);
+        console.log(`[${role}] user-published — uid: ${user.uid}, mediaType: ${mediaType}`);
         if (mediaType === "audio" || mediaType === "video") {
           handleRemoteUserPublished(client, user, mediaType);
         }
       });
       client.on("user-unpublished", (user, mediaType) => {
         if (clientRef.current !== client) return;
-        console.log("[AGORA user-unpublished] uid:", user.uid, "mediaType:", mediaType);
+        console.log(`[${role}] user-unpublished — uid: ${user.uid}, mediaType: ${mediaType}`);
         if (mediaType === "audio" || mediaType === "video") {
           handleRemoteUserUnpublished(user, mediaType);
         }
       });
       client.on("user-left", (user) => {
         if (clientRef.current !== client) return;
-        console.log("[AGORA user-left] uid:", user.uid);
+        console.log(`[${role}] user-left — uid: ${user.uid}`);
         handleRemoteUserLeft(user);
       });
 
       client.on("connection-state-change", (curState, _prevState, reason) => {
         if (clientRef.current !== client) return;
-        console.log("[AGORA CONNECTION] state:", curState, "reason:", reason);
+        console.log(`[${role}] connection-state-change — state: ${curState}, reason: ${reason}`);
         if (curState === "CONNECTED") {
           setState("connected");
           retryCountRef.current = 0;
@@ -370,54 +358,50 @@ export function useAgoraClient({
       });
 
       client.on("exception", (event) => {
-        console.warn("[agora] exception", event);
+        console.warn(`[${role}] Agora exception:`, event);
       });
 
       client.on("token-privilege-will-expire", async () => {
-        console.log("[agora] token-privilege-will-expire, renewing…");
+        console.log(`[${role}] token-privilege-will-expire, renewing…`);
         try {
           const renewal = await fetchAgoraToken(channelRef.current, uidRef.current);
           await client.renewToken(renewal.token);
-          console.log("[agora] token renewed via will-expire event");
+          console.log(`[${role}] token renewed via will-expire event`);
         } catch (err) {
-          console.warn("[agora] token renewal (will-expire) failed", err);
+          console.warn(`[${role}] token renewal (will-expire) failed:`, err);
         }
       });
 
       client.on("token-privilege-did-expire", async () => {
-        console.warn("[agora] token expired, attempting renewal…");
+        console.warn(`[${role}] token expired, attempting renewal…`);
         try {
           const renewal = await fetchAgoraToken(channelRef.current, uidRef.current);
           await client.renewToken(renewal.token);
-          console.log("[agora] token renewed after expiry");
+          console.log(`[${role}] token renewed after expiry`);
         } catch (err) {
-          console.warn("[agora] token renewal (did-expire) failed", err);
+          console.warn(`[${role}] token renewal (did-expire) failed:`, err);
         }
       });
 
-      // Fetch a valid RTC token from the server before joining.
-      // The Agora project has App Certificate enabled, so a static null
-      // token triggers CAN_NOT_GET_GATEWAY_SERVER ("dynamic use static key").
+      // Fetch RTC token from the edge function.
       const uid = uidRef.current;
-      console.log("[AGORA JOIN] role:", isHostRef.current ? "host" : "guest", "uid:", uid, "channel:", channelRef.current);
+      console.log(`[${role}] channel: ${channelRef.current}, uid: ${uid}`);
+      console.log(`[${role}] requesting token…`);
       let tokenData;
       try {
         tokenData = await fetchAgoraToken(channelRef.current, uid);
-        console.log("[AGORA JOIN] token received — appId:", tokenData.appId, "channel:", tokenData.channelName, "uid:", tokenData.uid, "expireTs:", tokenData.expireTs);
+        console.log(`[${role}] token received — appId: ${tokenData.appId}, channel: ${tokenData.channelName}, uid: ${tokenData.uid}, expireTs: ${tokenData.expireTs}`);
       } catch (tokenErr) {
-        console.error("[AGORA JOIN] token fetch failed", tokenErr);
-        throw new Error(
-          "Could not authenticate with the call service. Please try again.",
-        );
+        console.error(`[${role}] token fetch FAILED:`, tokenErr);
+        throw new Error("Could not authenticate with the call service. Please try again.");
       }
 
-      // Guard against stale invocation (e.g. React StrictMode remount).
       if (!mountedRef.current || clientRef.current !== client) {
-        console.log("[AGORA JOIN] aborted — client stale after token fetch");
+        console.log(`[${role}] join aborted — client stale after token fetch`);
         return;
       }
 
-      // Use the exact UID + channel the token was generated for.
+      console.log(`[${role}] joining channel: ${tokenData.channelName}, uid: ${tokenData.uid}`);
       await client.join(
         tokenData.appId,
         tokenData.channelName,
@@ -425,15 +409,14 @@ export function useAgoraClient({
         tokenData.uid,
       );
 
-      // Guard again after the async join completes.
       if (!mountedRef.current || clientRef.current !== client) {
-        console.log("[AGORA JOIN] aborted — client stale after join");
+        console.log(`[${role}] join aborted — client stale after join`);
         try { client.leave(); } catch {}
         return;
       }
 
       joinedRef.current = true;
-      console.log("[AGORA JOIN] success — joined channel:", tokenData.channelName, "uid:", tokenData.uid);
+      console.log(`[${role}] join SUCCESS — channel: ${tokenData.channelName}, uid: ${tokenData.uid}`);
       setState("connecting");
 
       // Schedule token renewal 5 minutes before expiry
@@ -445,18 +428,17 @@ export function useAgoraClient({
         try {
           const renewal = await fetchAgoraToken(channelRef.current, uidRef.current);
           await clientRef.current.renewToken(renewal.token);
-          console.log("[agora] token renewed");
+          console.log(`[${role}] token renewed (scheduled)`);
         } catch (err) {
-          console.warn("[agora] token renewal failed", err);
+          console.warn(`[${role}] token renewal (scheduled) failed:`, err);
         }
       }, renewIn);
 
-      // BUG 1: Before publishing, verify the MediaStreamTrack exists and is
-      // readyState === "live". Block publishing and wait if not ready.
+      // Publish local tracks — video and audio independently.
       const publishLocalTracks = async () => {
         const stream = localStreamRef.current;
         if (!stream) {
-          console.warn("[AGORA PUBLISH] no local stream — skipping publish");
+          console.warn(`[${role}] no local stream — skipping publish`);
           return;
         }
 
@@ -466,7 +448,7 @@ export function useAgoraClient({
         if (videoMediaTrack) {
           const live = await waitForLiveTrack(videoMediaTrack);
           if (!live) {
-            console.warn("[AGORA PUBLISH] video track not live — skipping video publish");
+            console.warn(`[${role}] video track not live — skipping video publish`);
           } else {
             const vTrack = AgoraRTC.createCustomVideoTrack({
               mediaStreamTrack: videoMediaTrack,
@@ -474,17 +456,17 @@ export function useAgoraClient({
             videoTrackRef.current = vTrack;
             await client.publish(vTrack);
             published.push("video");
-            console.log("[AGORA PUBLISH] video track published");
+            console.log(`[${role}] publish SUCCESS — video track published`);
           }
         } else {
-          console.warn("[AGORA PUBLISH] no video track in stream");
+          console.warn(`[${role}] no video track in stream`);
         }
 
         const audioMediaTrack = stream.getAudioTracks()[0];
         if (audioMediaTrack) {
           const liveAudio = await waitForLiveTrack(audioMediaTrack, 10);
           if (!liveAudio) {
-            console.warn("[AGORA PUBLISH] audio track not live — skipping audio publish");
+            console.warn(`[${role}] audio track not live — skipping audio publish`);
           } else {
             const aTrack = AgoraRTC.createCustomAudioTrack({
               mediaStreamTrack: audioMediaTrack,
@@ -492,13 +474,13 @@ export function useAgoraClient({
             audioTrackRef.current = aTrack;
             await client.publish(aTrack);
             published.push("audio");
-            console.log("[AGORA PUBLISH] audio track published");
+            console.log(`[${role}] publish SUCCESS — audio track published`);
           }
         } else {
-          console.warn("[AGORA PUBLISH] no audio track in stream");
+          console.warn(`[${role}] no audio track in stream`);
         }
 
-        console.log("[AGORA PUBLISH] tracks:", published.length ? published.join(", ") : "none");
+        console.log(`[${role}] publish complete — tracks: ${published.length ? published.join(", ") : "none"}`);
       };
 
       await publishLocalTracks();
@@ -506,24 +488,23 @@ export function useAgoraClient({
       if (mountedRef.current && clientRef.current === client) {
         setState("connected");
         retryCountRef.current = 0;
+        console.log(`[${role}] state: connected`);
       }
     } catch (err) {
-      console.error("[agora] join failed", err);
+      console.error(`[${role}] join FAILED:`, err);
       if (!mountedRef.current) return;
 
       if (retryCountRef.current < MAX_JOIN_RETRIES) {
         setState("reconnecting");
         scheduleRejoinRef.current();
       } else {
-        const msg =
-          err instanceof Error ? err.message : "Failed to join call";
+        const msg = err instanceof Error ? err.message : "Failed to join call";
         setError(msg);
         setState("error");
       }
     }
-  }, [handleRemoteUserPublished, handleRemoteUserUnpublished, handleRemoteUserLeft, detachTracks, clearTokenRenewalTimer]);
+  }, [handleRemoteUserPublished, handleRemoteUserUnpublished, handleRemoteUserLeft, detachTracks, clearTokenRenewalTimer, role]);
 
-  // Keep the ref in sync so scheduleRejoin can call joinChannel.
   useEffect(() => {
     joinChannelRef.current = joinChannel;
   }, [joinChannel]);
@@ -561,7 +542,6 @@ export function useAgoraClient({
   }, []);
 
   const resumeRemoteVideo = useCallback(() => {
-    // Re-emit the remote stream so the video element re-attaches and plays.
     if (remoteVideoTrackRef.current) {
       const stream = new MediaStream();
       stream.addTrack(remoteVideoTrackRef.current.getMediaStreamTrack());
