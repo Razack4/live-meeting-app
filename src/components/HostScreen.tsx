@@ -12,18 +12,20 @@ import VideoCall from "@/components/VideoCall";
 import { useAgoraClient } from "@/hooks/useAgoraClient";
 import {
   buildShareableLink,
-  generateRoomId,
+  FIXED_CHANNEL,
+  generateAccessCode,
   isAcceptableVideo,
   type VideoSelection,
 } from "@/types";
 import { createVideoStream } from "@/lib/createVideoStream";
+import { supabase } from "@/lib/supabase";
 
 type HostPhase = "setup" | "preparing" | "active";
 
 interface ActiveSession {
   localStream: MediaStream;
   displayName: string;
-  roomId: string;
+  accessCode: string;
 }
 
 export default function HostScreen() {
@@ -33,7 +35,7 @@ export default function HostScreen() {
   const [error, setError] = useState<string | null>(null);
   const [dragOver, setDragOver] = useState(false);
   const [toastShow, setToastShow] = useState(false);
-  const [roomId, setRoomId] = useState<string>("");
+  const [accessCode, setAccessCode] = useState<string>("");
   const [linkGenerated, setLinkGenerated] = useState(false);
   const [session, setSession] = useState<ActiveSession | null>(null);
   const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
@@ -64,7 +66,7 @@ export default function HostScreen() {
   );
 
   useEffect(() => {
-    setRoomId(generateRoomId());
+    setAccessCode(generateAccessCode());
     return () => {
       if (selection) revokeUrl(selection.url);
       if (videoCleanupRef.current) videoCleanupRef.current();
@@ -91,7 +93,7 @@ export default function HostScreen() {
   };
 
   const handleCopyLink = async () => {
-    const link = buildShareableLink(roomId);
+    const link = buildShareableLink(accessCode);
     try {
       await navigator.clipboard.writeText(link);
     } catch {
@@ -124,7 +126,6 @@ export default function HostScreen() {
     videoCleanupRef.current = cleanup;
     videoResumeRef.current = resume;
     try {
-      // BUG B: wait for the stream to have video tracks before joining Agora.
       await ready;
     } catch {
       setError("Could not load the video. Please try a different file.");
@@ -137,15 +138,69 @@ export default function HostScreen() {
       return;
     }
     const name = displayName.trim() || "Host";
-    setSession({ localStream: stream, displayName: name, roomId });
+
+    // Create call record in Supabase
+    try {
+      const { error: insertError } = await supabase
+        .from("calls")
+        .insert({
+          access_code: accessCode,
+          channel_name: FIXED_CHANNEL,
+          status: "waiting",
+          host_display_name: name,
+        });
+      if (insertError) {
+        // If code already exists, generate a new one and retry
+        if (insertError.code === "23505") {
+          const newCode = generateAccessCode();
+          setAccessCode(newCode);
+          const { error: retryError } = await supabase
+            .from("calls")
+            .insert({
+              access_code: newCode,
+              channel_name: FIXED_CHANNEL,
+              status: "waiting",
+              host_display_name: name,
+            });
+          if (retryError) throw retryError;
+        } else {
+          throw insertError;
+        }
+      }
+    } catch (err) {
+      console.error("[HOST] Failed to create call record:", err);
+      setError("Could not start the call. Please try again.");
+      setPhase("setup");
+      if (videoCleanupRef.current) {
+        videoCleanupRef.current();
+        videoCleanupRef.current = null;
+      }
+      videoResumeRef.current = null;
+      return;
+    }
+
+    console.log("[HOST] Call record created — access_code:", accessCode, "channel:", FIXED_CHANNEL);
+    setSession({ localStream: stream, displayName: name, accessCode });
     setPhase("active");
   };
 
   const handleRemoteStream = useCallback((s: MediaStream) => {
+    console.log("[HOST] Remote stream received");
     setRemoteStream(s);
-  }, []);
+
+    // Update call status to active
+    supabase
+      .from("calls")
+      .update({ status: "active" })
+      .eq("access_code", accessCode)
+      .then(({ error }) => {
+        if (error) console.warn("[HOST] Failed to update call status to active:", error);
+        else console.log("[HOST] Call status updated to active");
+      });
+  }, [accessCode]);
 
   const handleRemoteEnd = useCallback(() => {
+    console.log("[HOST] Remote user left — waiting for rejoin");
     setRemoteStream(null);
   }, []);
 
@@ -157,7 +212,7 @@ export default function HostScreen() {
     toggleMic,
     resumeRemoteVideo,
   } = useAgoraClient({
-    channel: session?.roomId ?? "",
+    channel: FIXED_CHANNEL,
     isHost: true,
     localStream: session?.localStream ?? null,
     onRemoteStream: handleRemoteStream,
@@ -175,11 +230,22 @@ export default function HostScreen() {
     }
     videoResumeRef.current = null;
     setRemoteStream(null);
+
+    // Mark call as ended
+    supabase
+      .from("calls")
+      .update({ status: "ended", ended_at: new Date().toISOString() })
+      .eq("access_code", accessCode)
+      .then(({ error }) => {
+        if (error) console.warn("[HOST] Failed to mark call as ended:", error);
+        else console.log("[HOST] Call marked as ended");
+      });
+
     setSession(null);
     setPhase("setup");
     setLinkGenerated(false);
-    setRoomId(generateRoomId());
-  }, [session, agoraCleanup]);
+    setAccessCode(generateAccessCode());
+  }, [session, agoraCleanup, accessCode]);
 
   if ((phase === "active" || phase === "preparing") && session) {
     return (
@@ -318,7 +384,7 @@ export default function HostScreen() {
                   </button>
                 </div>
                 <p className="text-xs text-white/50 break-all font-mono">
-                  {buildShareableLink(roomId)}
+                  {buildShareableLink(accessCode)}
                 </p>
               </div>
 
