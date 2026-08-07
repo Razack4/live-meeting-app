@@ -47,10 +47,14 @@ export default function VideoCall({
 
   useEffect(() => {
     const v = mainVideoRef.current;
-    if (!v) return;
+    if (!v) {
+      console.warn("[VideoCall] mainVideoRef is null — cannot attach stream");
+      return;
+    }
     if (remoteStream && !swapped) {
       v.srcObject = remoteStream;
       v.muted = false;
+      console.log("[VideoCall] main video ← remote stream");
     } else if (remoteStream && swapped) {
       v.srcObject = localStream;
       v.muted = true;
@@ -58,7 +62,7 @@ export default function VideoCall({
       v.srcObject = localStream;
       v.muted = true;
     }
-    v.play().catch(() => {});
+    v.play().catch((err) => console.warn("[VideoCall] main video play() failed:", err));
   }, [remoteStream, localStream, swapped]);
 
   useEffect(() => {
@@ -71,7 +75,7 @@ export default function VideoCall({
       v.srcObject = localStream;
       v.muted = true;
     }
-    v.play().catch(() => {});
+    v.play().catch((err) => console.warn("[VideoCall] pip video play() failed:", err));
   }, [localStream, remoteStream, swapped]);
 
   useEffect(() => {
@@ -90,7 +94,7 @@ export default function VideoCall({
     const resumeAllVideo = () => {
       [mainVideoRef.current, pipVideoRef.current].forEach((v) => {
         if (v && v.paused) {
-          v.play().catch(() => {});
+          v.play().catch((err) => console.warn("[VideoCall] resume play() failed:", err));
         }
       });
       onResumeRemoteVideo?.();
