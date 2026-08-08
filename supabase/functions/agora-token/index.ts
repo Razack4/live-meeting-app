@@ -97,10 +97,10 @@ function adler32(data: Uint8Array): number {
 
 // Produce zlib-format (RFC 1950) compressed data:
 //   [2-byte header][raw deflate body][4-byte Adler-32 trailer]
-// CompressionStream("deflate") gives raw deflate (RFC 1951);
+// CompressionStream("deflate-raw") gives raw deflate (RFC 1951);
 // we wrap it with the zlib header and checksum that Agora expects.
 async function zlibCompress(data: Uint8Array): Promise<Uint8Array> {
-  const cs = new CompressionStream("deflate");
+  const cs = new CompressionStream("deflate-raw");
   const writer = cs.writable.getWriter();
   writer.write(toArrayBuffer(data));
   writer.close();
