@@ -77,6 +77,9 @@ export function useAgoraClient({
   const videoTrackRef = useRef<ILocalTrack | null>(null);
   const localStreamRef = useRef<MediaStream | null>(localStream);
   const joinedRef = useRef(false);
+  const joiningRef = useRef(false);
+  const joinGenerationRef = useRef(0);
+  const intentionalDisconnectRef = useRef(false);
   const retryCountRef = useRef(0);
   const reconnectTimerRef = useRef<number | null>(null);
   const mountedRef = useRef(true);
@@ -86,6 +89,7 @@ export function useAgoraClient({
   const remoteUsersRef = useRef<Map<string, IAgoraRTCRemoteUser>>(new Map());
   const tokenRenewalTimerRef = useRef<number | null>(null);
   const uidRef = useRef<number>(generateUid());
+  const streamWaitTimerRef = useRef<number | null>(null);
 
   const onRemoteStreamRef = useRef(onRemoteStream);
   const onRemoteEndRef = useRef(onRemoteEnd);
@@ -100,10 +104,6 @@ export function useAgoraClient({
   useEffect(() => {
     onRemoteVideoUpdateRef.current = onRemoteVideoUpdate;
   }, [onRemoteVideoUpdate]);
-
-  useEffect(() => {
-    localStreamRef.current = localStream;
-  }, [localStream]);
 
   useEffect(() => {
     channelRef.current = channel;
@@ -155,6 +155,10 @@ export function useAgoraClient({
   }, []);
 
   const cleanup = useCallback(() => {
+    // Invalidate any in-flight join so it cannot install itself as active.
+    joinGenerationRef.current += 1;
+    joiningRef.current = false;
+    intentionalDisconnectRef.current = true;
     clearReconnectTimer();
     clearTokenRenewalTimer();
     destroyTracks();
@@ -231,6 +235,10 @@ export function useAgoraClient({
   );
 
   const scheduleRejoin = useCallback(() => {
+    if (intentionalDisconnectRef.current) {
+      console.log(`[${role}] scheduleRejoin aborted — intentional disconnect`);
+      return;
+    }
     if (retryCountRef.current >= MAX_JOIN_RETRIES) {
       console.error(`[${role}] reconnect FAILED — max retries exceeded`);
       setState("error");
@@ -242,7 +250,7 @@ export function useAgoraClient({
     const delay = getRetryDelay(retryCountRef.current);
     console.log(`[${role}] reconnecting — attempt ${retryCountRef.current} in ${Math.round(delay)}ms`);
     reconnectTimerRef.current = window.setTimeout(() => {
-      if (mountedRef.current && !joinedRef.current) {
+      if (mountedRef.current && !joinedRef.current && !joiningRef.current) {
         detachTracks();
         if (clientRef.current) {
           try {
@@ -268,6 +276,10 @@ export function useAgoraClient({
     }
     if (joinedRef.current) {
       console.warn(`[${role}] join aborted — already joined`);
+      return;
+    }
+    if (joiningRef.current) {
+      console.warn(`[${role}] join aborted — join already in progress`);
       return;
     }
 
@@ -298,15 +310,28 @@ export function useAgoraClient({
       console.log(`[${role}] video track is live, proceeding`);
     }
 
+    // Acquire the join guard and assign a generation for this attempt.
+    joiningRef.current = true;
+    const generation = joinGenerationRef.current;
+    intentionalDisconnectRef.current = false;
+
     setState("initializing");
     setError(null);
 
+    const guardStillValid = () =>
+      mountedRef.current &&
+      joinGenerationRef.current === generation &&
+      !joinedRef.current;
+
     try {
-      if (!mountedRef.current) return;
+      if (!mountedRef.current) {
+        joiningRef.current = false;
+        return;
+      }
 
       const client = AgoraRTC.createClient({ mode: "rtc", codec: "vp8" });
       clientRef.current = client;
-      console.log(`[${role}] Agora client created`);
+      console.log(`[${role}] Agora client created (gen ${generation})`);
 
       client.on("user-joined", (user) => {
         console.log(`[${role}] user-joined — uid: ${user.uid}`);
@@ -340,6 +365,12 @@ export function useAgoraClient({
         } else if (curState === "RECONNECTING") {
           setState("reconnecting");
         } else if (curState === "DISCONNECTED") {
+          // If we initiated this disconnect (cleanup/leave), do NOT rejoin.
+          if (intentionalDisconnectRef.current) {
+            console.log(`[${role}] DISCONNECTED is intentional — skipping rejoin`);
+            return;
+          }
+          // Genuine unexpected disconnection — attempt rejoin.
           setState("reconnecting");
           if (mountedRef.current && joinedRef.current) {
             joinedRef.current = false;
@@ -396,8 +427,10 @@ export function useAgoraClient({
         throw new Error("Could not authenticate with the call service. Please try again.");
       }
 
-      if (!mountedRef.current || clientRef.current !== client) {
-        console.log(`[${role}] join aborted — client stale after token fetch`);
+      if (!guardStillValid()) {
+        console.log(`[${role}] join aborted — stale generation after token fetch`);
+        joiningRef.current = false;
+        try { client.leave(); } catch {}
         return;
       }
 
@@ -409,13 +442,15 @@ export function useAgoraClient({
         tokenData.uid,
       );
 
-      if (!mountedRef.current || clientRef.current !== client) {
-        console.log(`[${role}] join aborted — client stale after join`);
+      if (!guardStillValid()) {
+        console.log(`[${role}] join aborted — stale generation after join`);
+        joiningRef.current = false;
         try { client.leave(); } catch {}
         return;
       }
 
       joinedRef.current = true;
+      joiningRef.current = false;
       console.log(`[${role}] join SUCCESS — channel: ${tokenData.channelName}, uid: ${tokenData.uid}`);
       setState("connecting");
 
@@ -442,6 +477,11 @@ export function useAgoraClient({
           return;
         }
 
+        const stillActive = () =>
+          mountedRef.current &&
+          joinGenerationRef.current === generation &&
+          clientRef.current === client;
+
         const published: string[] = [];
 
         const videoMediaTrack = stream.getVideoTracks()[0];
@@ -449,6 +489,9 @@ export function useAgoraClient({
           const live = await waitForLiveTrack(videoMediaTrack);
           if (!live) {
             console.warn(`[${role}] video track not live — skipping video publish`);
+          } else if (!stillActive()) {
+            console.log(`[${role}] stale generation after video track check — skipping publish`);
+            return;
           } else {
             const vTrack = AgoraRTC.createCustomVideoTrack({
               mediaStreamTrack: videoMediaTrack,
@@ -467,6 +510,13 @@ export function useAgoraClient({
           const liveAudio = await waitForLiveTrack(audioMediaTrack, 10);
           if (!liveAudio) {
             console.warn(`[${role}] audio track not live — skipping audio publish`);
+          } else if (!stillActive()) {
+            console.log(`[${role}] stale generation after audio track check — skipping publish`);
+            if (videoTrackRef.current) {
+              try { videoTrackRef.current.stop(); } catch {}
+              videoTrackRef.current = null;
+            }
+            return;
           } else {
             const aTrack = AgoraRTC.createCustomAudioTrack({
               mediaStreamTrack: audioMediaTrack,
@@ -492,6 +542,8 @@ export function useAgoraClient({
       }
     } catch (err) {
       console.error(`[${role}] join FAILED:`, err);
+      joiningRef.current = false;
+
       if (!mountedRef.current) return;
 
       if (retryCountRef.current < MAX_JOIN_RETRIES) {
@@ -509,13 +561,26 @@ export function useAgoraClient({
     joinChannelRef.current = joinChannel;
   }, [joinChannel]);
 
+  // Fix 1: Main connection effect depends on [channel] only, NOT localStream.
+  // localStreamRef is kept in sync by a separate effect, so the Agora client
+  // is never torn down and recreated merely because the MediaStream object
+  // identity changed.
   useEffect(() => {
-    if (!channel || !localStream) return;
+    if (!channel) return;
 
-    joinChannel();
+    // Wait until a local stream is available before joining.
+    const startJoin = () => {
+      if (!localStreamRef.current) {
+        const id = window.setTimeout(startJoin, 100);
+        streamWaitTimerRef.current = id;
+        return;
+      }
+      joinChannel();
+    };
+    startJoin();
 
     const handleOnline = () => {
-      if (mountedRef.current && !joinedRef.current && clientRef.current === null) {
+      if (mountedRef.current && !joinedRef.current && !joiningRef.current && clientRef.current === null) {
         retryCountRef.current = 0;
         joinChannel();
       }
@@ -524,10 +589,38 @@ export function useAgoraClient({
 
     return () => {
       window.removeEventListener("online", handleOnline);
+      if (streamWaitTimerRef.current !== null) {
+        window.clearTimeout(streamWaitTimerRef.current);
+        streamWaitTimerRef.current = null;
+      }
       cleanup();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [channel, localStream]);
+  }, [channel]);
+
+  // Fix 1 (cont.): When the local stream changes and we already have an active
+  // client with published tracks, replace the published tracks in-place instead
+  // of tearing down and rejoining. If not yet joined, just update the ref (the
+  // main effect's startJoin loop will pick it up).
+  useEffect(() => {
+    localStreamRef.current = localStream;
+
+    // If we have an active client with published video track, replace it.
+    if (clientRef.current && joinedRef.current && videoTrackRef.current && localStream) {
+      const newVideoTrack = localStream.getVideoTracks()[0];
+      const oldTrack = videoTrackRef.current as unknown as { replaceTrack: (track: MediaStreamTrack, stopOldTrack: boolean) => Promise<void>; getMediaStreamTrack: () => MediaStreamTrack };
+      if (newVideoTrack && oldTrack.getMediaStreamTrack() !== newVideoTrack) {
+        (async () => {
+          try {
+            await oldTrack.replaceTrack(newVideoTrack, true);
+            console.log(`[${role}] replaced video track in-place`);
+          } catch (err) {
+            console.warn(`[${role}] in-place track replace failed, leaving as-is:`, err);
+          }
+        })();
+      }
+    }
+  }, [localStream, role]);
 
   const toggleCamera = useCallback((on: boolean) => {
     if (videoTrackRef.current) {
